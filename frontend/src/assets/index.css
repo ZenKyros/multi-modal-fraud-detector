@@ -1,0 +1,121 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-cyber-darker text-white font-sans;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-mono font-bold;
+  }
+}
+
+@layer components {
+  .cyber-card {
+    @apply bg-glass border border-glass rounded-lg p-4 backdrop-blur-sm;
+  }
+
+  .cyber-button {
+    @apply px-4 py-2 rounded font-mono font-semibold transition-all duration-200;
+  }
+
+  .cyber-button-primary {
+    @apply cyber-button bg-cyber-blue hover:bg-cyber-blue/80 text-white;
+  }
+
+  .cyber-button-danger {
+    @apply cyber-button bg-cyber-red hover:bg-cyber-red/80 text-white;
+  }
+
+  .cyber-input {
+    @apply bg-cyber-darker border border-glass rounded px-3 py-2 text-white font-mono placeholder-gray-500 focus:outline-none focus:border-cyber-cyan;
+  }
+
+  .threat-badge {
+    @apply inline-block px-3 py-1 rounded font-mono text-sm font-bold;
+  }
+
+  .threat-low {
+    @apply threat-badge bg-cyber-green/20 text-cyber-green border border-cyber-green;
+  }
+
+  .threat-medium {
+    @apply threat-badge bg-yellow-500/20 text-yellow-400 border border-yellow-400;
+  }
+
+  .threat-high {
+    @apply threat-badge bg-cyber-red/20 text-cyber-red border border-cyber-red;
+  }
+
+  .threat-critical {
+    @apply threat-badge bg-cyber-purple/20 text-cyber-purple border border-cyber-purple animate-pulse;
+  }
+
+  .glitch-text {
+    position: relative;
+    font-family: monospace;
+  }
+
+  .glitch-text::before {
+    content: attr(data-text);
+    position: absolute;
+    left: 0;
+    top: 0;
+    color: rgb(0, 217, 255);
+    clip: rect(0, 0, 0, 0);
+    animation: glitch-anim 2s infinite;
+  }
+
+  @keyframes glitch-anim {
+    0%, 100% {
+      clip: rect(0, 0, 0, 0);
+    }
+    20% {
+      clip: rect(0, 9999px, 0, 0);
+    }
+    40% {
+      clip: rect(0, 9999px, 0, 0);
+    }
+    60% {
+      clip: rect(0, 9999px, 0, 0);
+    }
+    80% {
+      clip: rect(0, 9999px, 0, 0);
+    }
+  }
+
+  .scan-line {
+    background: linear-gradient(90deg, transparent, rgba(0, 217, 255, 0.1), transparent);
+    animation: scan 8s linear infinite;
+  }
+
+  @keyframes scan {
+    0% {
+      transform: translateY(-100%);
+    }
+    100% {
+      transform: translateY(100vh);
+    }
+  }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgb(0, 102, 255);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(0, 217, 255);
+}
