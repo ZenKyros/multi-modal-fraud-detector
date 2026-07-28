@@ -1,4 +1,4 @@
-````markdown
+
 # 🛡️ Multi-Modal Fraud Detector
 
 > A real-time, Bayesian-fusion fraud detection system that analyses phone calls using three specialised AI pillars, a dynamic payoff matrix, and Nash equilibrium—visualised in an interactive Streamlit dashboard.
@@ -577,4 +577,3 @@ If you encounter issues or have suggestions:
 ---
 
 ⭐ If you found this project useful, consider giving it a **GitHub Star**.
-````
