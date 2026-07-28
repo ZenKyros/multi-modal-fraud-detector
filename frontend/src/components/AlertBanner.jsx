@@ -1,193 +1,100 @@
-import React from 'react'
-import { AlertTriangle, CheckCircle, XCircle, Shield } from 'lucide-react'
+import React, { useEffect, useState } from 'react'
 
-/**
- * AlertBanner Component
- * 
- * Displays:
- * 1. Flashing threat warnings based on threat index
- * 2. LLM verification results and confidence
- * 3. Fraud classification and recommendations
- */
-function AlertBanner({ threatLevel, threatIndex, requiresVerification, verification }) {
-  // Get color scheme based on threat level
-  const getTheme = () => {
-    if (threatLevel === 'safe')
-      return {
-        bg: 'bg-cyber-green/20',
-        border: 'border-cyber-green',
-        text: 'text-cyber-green',
-        icon: 'text-cyber-green',
-      }
-    if (threatLevel === 'medium')
-      return {
-        bg: 'bg-yellow-500/20',
-        border: 'border-yellow-500',
-        text: 'text-yellow-400',
-        icon: 'text-yellow-400',
-      }
-    if (threatLevel === 'high')
-      return {
-        bg: 'bg-cyber-red/20',
-        border: 'border-cyber-red',
-        text: 'text-cyber-red',
-        icon: 'text-cyber-red',
-      }
-    return {
-      bg: 'bg-cyber-purple/20',
-      border: 'border-cyber-purple',
-      text: 'text-cyber-purple',
-      icon: 'text-cyber-purple animate-pulse',
+const AlertBanner = ({ alert }) => {
+  const [isVisible, setIsVisible] = useState(true)
+
+  // Reset visibility when alert changes
+  useEffect(() => {
+    setIsVisible(true)
+  }, [alert])
+
+  if (!alert || !isVisible) return null
+
+  // Define styles per alert type
+  const typeMap = {
+    danger: {
+      icon: '🚨',
+      gradient: 'from-red-600/90 via-rose-600/80 to-red-700/90',
+      border: 'border-red-400/30',
+      glow: 'shadow-red-500/30',
+      text: 'text-white',
+      accent: 'bg-red-400/20'
+    },
+    warning: {
+      icon: '⚠️',
+      gradient: 'from-amber-500/90 via-orange-500/80 to-amber-600/90',
+      border: 'border-amber-400/30',
+      glow: 'shadow-amber-500/30',
+      text: 'text-white',
+      accent: 'bg-amber-400/20'
+    },
+    info: {
+      icon: 'ℹ️',
+      gradient: 'from-blue-500/90 via-cyan-500/80 to-blue-600/90',
+      border: 'border-blue-400/30',
+      glow: 'shadow-blue-500/30',
+      text: 'text-white',
+      accent: 'bg-blue-400/20'
     }
   }
 
-  const theme = getTheme()
+  const styles = typeMap[alert.type] || typeMap.info
 
-  // Get threat label
-  const getThreatLabel = () => {
-    if (threatLevel === 'safe') return '✓ SAFE'
-    if (threatLevel === 'medium') return '⚠ MEDIUM RISK'
-    if (threatLevel === 'high') return '⚠ HIGH THREAT'
-    return '🚨 CRITICAL THREAT'
+  const handleDismiss = () => {
+    setIsVisible(false)
   }
 
   return (
-    <div className={`${theme.bg} border-b-2 ${theme.border} px-6 py-4`}>
-      {/* Main threat banner */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-3">
-          {threatLevel === 'critical' && (
-            <div className={`${theme.icon}`}>
-              <AlertTriangle size={24} className="animate-pulse" />
-            </div>
-          )}
-          {threatLevel === 'high' && (
-            <AlertTriangle size={24} className={theme.icon} />
-          )}
-          {threatLevel === 'medium' && <Shield size={24} className={theme.icon} />}
-          {threatLevel === 'safe' && <CheckCircle size={24} className={theme.icon} />}
+    <div className={`
+      mx-4 my-2 rounded-xl overflow-hidden backdrop-blur-xl
+      bg-gradient-to-r ${styles.gradient} ${styles.border} border
+      shadow-lg ${styles.glow} transition-all duration-500 ease-out
+      animate-slideDown
+    `}>
+      <div className="flex items-center gap-4 px-5 py-4">
+        {/* Icon */}
+        <div className="text-3xl flex-shrink-0">
+          {styles.icon}
+        </div>
 
-          <div>
-            <h2 className={`font-mono font-bold text-lg ${theme.text}`}>
-              {getThreatLabel()}
-            </h2>
-            <p className="text-xs text-gray-400 font-mono">
-              Threat Index: {(threatIndex * 100).toFixed(1)}%
+        {/* Content */}
+        <div className="flex-1 min-w-0">
+          <h4 className={`font-bold text-base ${styles.text}`}>
+            {alert.message}
+          </h4>
+          {alert.details && (
+            <p className={`text-sm ${styles.text} opacity-80 mt-0.5 line-clamp-2`}>
+              {alert.details}
             </p>
-          </div>
+          )}
         </div>
 
-        {/* Threat meter */}
-        <div className="hidden lg:block">
-          <div className="w-40 h-2 bg-cyber-darker rounded overflow-hidden border border-glass/30">
-            <div
-              className={`h-full transition-all ${
-                threatLevel === 'safe'
-                  ? 'bg-cyber-green'
-                  : threatLevel === 'medium'
-                    ? 'bg-yellow-500'
-                    : threatLevel === 'high'
-                      ? 'bg-cyber-red'
-                      : 'bg-cyber-purple'
-              }`}
-              style={{ width: `${threatIndex * 100}%` }}
-            />
-          </div>
-        </div>
+        {/* Dismiss button */}
+        <button
+          onClick={handleDismiss}
+          className={`
+            flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center
+            ${styles.accent} hover:bg-white/20 transition-colors
+            text-white/70 hover:text-white
+          `}
+          aria-label="Dismiss alert"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
       </div>
 
-      {/* Verification results */}
-      {requiresVerification && verification && (
-        <div className="mt-4 pt-3 border-t border-glass/30">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {/* Verification status */}
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                {verification.is_fraud ? (
-                  <XCircle size={18} className="text-cyber-red" />
-                ) : (
-                  <CheckCircle size={18} className="text-cyber-green" />
-                )}
-                <span className="font-mono font-bold text-sm">
-                  LLM Verification Result
-                </span>
-              </div>
-
-              <div className="ml-6 space-y-1 text-xs font-mono">
-                <p>
-                  <span className="text-gray-400">Status:</span>{' '}
-                  <span className={verification.is_fraud ? 'text-cyber-red' : 'text-cyber-green'}>
-                    {verification.is_fraud ? 'FRAUD DETECTED' : 'LEGITIMATE'}
-                  </span>
-                </p>
-                <p>
-                  <span className="text-gray-400">Confidence:</span>{' '}
-                  <span className="text-cyber-blue">
-                    {(verification.confidence * 100).toFixed(0)}%
-                  </span>
-                </p>
-                <p>
-                  <span className="text-gray-400">Type:</span>{' '}
-                  <span className="text-cyber-cyan capitalize">
-                    {verification.fraud_type}
-                  </span>
-                </p>
-              </div>
-            </div>
-
-            {/* Key indicators and recommendations */}
-            <div>
-              {verification.key_indicators && verification.key_indicators.length > 0 && (
-                <div className="mb-3">
-                  <p className="font-mono font-bold text-sm text-gray-300 mb-2">Key Indicators</p>
-                  <div className="flex flex-wrap gap-1">
-                    {verification.key_indicators.slice(0, 4).map((indicator, idx) => (
-                      <span
-                        key={idx}
-                        className="px-2 py-0.5 rounded bg-cyber-darker text-xs font-mono text-cyber-cyan border border-cyber-cyan/30"
-                      >
-                        {indicator}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {verification.recommendations && verification.recommendations.length > 0 && (
-                <div>
-                  <p className="font-mono font-bold text-sm text-gray-300 mb-2">
-                    Recommended Actions
-                  </p>
-                  <ul className="text-xs font-mono space-y-1">
-                    {verification.recommendations.slice(0, 2).map((rec, idx) => (
-                      <li key={idx} className="text-gray-300">
-                        • {rec}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Reasoning */}
-          {verification.reasoning && (
-            <div className="mt-3 pt-3 border-t border-glass/30">
-              <p className="text-xs font-mono text-gray-400 italic">
-                "{verification.reasoning}"
-              </p>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Loading state for verification */}
-      {requiresVerification && !verification && (
-        <div className="mt-3 text-xs font-mono text-gray-400 flex items-center gap-2">
-          <div className="w-2 h-2 bg-cyber-blue rounded-full animate-pulse" />
-          Running LLM verification...
-        </div>
-      )}
+      {/* Animation keyframes (injected via style) */}
+      <style>{`
+        @keyframes slideDown {
+          0% { opacity: 0; transform: translateY(-20px) scale(0.95); }
+          100% { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .animate-slideDown {
+          animation: slideDown 0.4s ease-out forwards;
+        }
+      `}</style>
     </div>
   )
 }

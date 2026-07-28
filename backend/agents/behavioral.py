@@ -1,264 +1,223 @@
-"""
-Pillar II: Behavioral Agent - Speaker Dominance & Conversational Pressure
-
-Uses Librosa to extract audio features that signal aggressive call center behavior:
-- Speaker dominance: duration of caller speech vs. pauses
-- Volume pressure: consistent high energy indicating aggression/pressure
-- Speech-to-pause ratios: minimal pause time (not letting user speak)
-- Energy variability: sudden spikes indicating aggressive statements
-
-All processing runs locally on CPU without GPU requirements.
-"""
-
-import numpy as np
 import librosa
-from typing import Dict, List, Optional, Tuple
-from scipy import signal
+import numpy as np
+from typing import Dict, Any, Optional
+import logging
+import os
+import tempfile
+import subprocess
 
+logger = logging.getLogger(__name__)
 
-class BehavioralAgent:
-    """Speaker behavior analysis using local Librosa features."""
+class BehavioralPillar:
+    """
+    Behavioral analysis pillar – extracts speaker dynamics:
+    - Speaker dominance (energy consistency and high-energy ratio)
+    - Volume pressure (dynamic range)
+    - Speech/pause ratio (stress indicator)
+    - Speaking rate (proxy for nervousness)
+    """
+    
+    def __init__(self, sample_rate: int = 16000, frame_length: int = 2048, hop_length: int = 512):
+        self.sample_rate = sample_rate
+        self.frame_length = frame_length
+        self.hop_length = hop_length
 
-    def __init__(self):
-        """Initialize the behavioral agent."""
-        self.energy_history: List[float] = []
-        self.dominance_history: List[float] = []
-
-    def _extract_energy_features(self, audio_chunk: np.ndarray, sr: int) -> Dict:
+    async def analyze(self, audio_path: str) -> Dict[str, Any]:
         """
-        Extract short-time energy features to detect volume pressure.
-        
-        Args:
-            audio_chunk: Audio samples
-            sr: Sample rate
-            
+        Analyze audio file for behavioral patterns.
         Returns:
-            Dictionary with energy statistics
+            - speaker_dominance (float 0-1)
+            - volume_pressure (float 0-1)
+            - speech_pause_ratio (float 0-1)
+            - speaking_rate (float 0-1)
+            - pillar_score (float 0-1)
         """
-        # Short-time energy
-        frame_length = int(0.025 * sr)  # 25ms frames
-        hop_length = int(0.010 * sr)    # 10ms hop
-        
-        energy = np.array([
-            np.sum(frame ** 2) for frame in librosa.util.frame(
-                audio_chunk, frame_length=frame_length, hop_length=hop_length
+        try:
+            # Robust audio loading (same as acoustic)
+            audio = self._load_audio(audio_path)
+            if audio is None:
+                return self._fallback_result("audio loading failed")
+            if len(audio) == 0:
+                return self._fallback_result("empty audio")
+
+            # Compute metrics
+            speaker_dominance = self._compute_speaker_dominance(audio)
+            volume_pressure = self._compute_volume_pressure(audio)
+            speech_pause_ratio = self._compute_speech_pause_ratio(audio)
+            speaking_rate = self._compute_speaking_rate(audio)
+
+            # Combine into pillar score (weighted)
+            pillar_score = (
+                0.3 * speaker_dominance +
+                0.2 * volume_pressure +
+                0.3 * speech_pause_ratio +
+                0.2 * speaking_rate
             )
-        ])
-        
-        # Normalize energy
-        if np.max(energy) > 0:
-            energy_normalized = energy / np.max(energy)
-        else:
-            energy_normalized = energy
-        
-        # Detect speech frames (threshold at 0.02)
-        speech_threshold = 0.02
-        speech_frames = energy_normalized > speech_threshold
-        
-        if len(speech_frames) == 0:
+            pillar_score = max(0.0, min(1.0, pillar_score))
+
             return {
-                "mean_energy": 0.0,
-                "max_energy": 0.0,
-                "energy_std": 0.0,
-                "energy_peaks": 0,
-                "volume_pressure": 0.0,
+                "speaker_dominance": speaker_dominance,
+                "volume_pressure": volume_pressure,
+                "speech_pause_ratio": speech_pause_ratio,
+                "speaking_rate": speaking_rate,
+                "pillar_score": pillar_score,
             }
-        
-        # Energy statistics
-        mean_energy = np.mean(energy_normalized[speech_frames]) if np.any(speech_frames) else 0.0
-        max_energy = np.max(energy_normalized) if len(energy_normalized) > 0 else 0.0
-        std_energy = np.std(energy_normalized[speech_frames]) if np.any(speech_frames) else 0.0
-        
-        # Detect energy peaks (sudden spikes)
-        peaks, _ = signal.find_peaks(energy_normalized, height=np.mean(energy_normalized) + np.std(energy_normalized))
-        energy_peaks = len(peaks)
-        
-        # Volume pressure: high mean energy + high peaks = aggressive
-        volume_pressure = min((mean_energy * 0.5 + max_energy * 0.5), 1.0)
-        
-        return {
-            "mean_energy": float(mean_energy),
-            "max_energy": float(max_energy),
-            "energy_std": float(std_energy),
-            "energy_peaks": int(energy_peaks),
-            "volume_pressure": float(volume_pressure),
-        }
 
-    def _extract_voice_activity(self, audio_chunk: np.ndarray, sr: int) -> Dict:
-        """
-        Detect voice activity and speech-to-pause ratios.
-        
-        Args:
-            audio_chunk: Audio samples
-            sr: Sample rate
-            
-        Returns:
-            Dictionary with voice activity metrics
-        """
-        # Compute RMS energy for VAD
-        rms = librosa.feature.rms(y=audio_chunk, frame_length=2048, hop_length=512)[0]
-        
-        # Threshold for voice activity (adaptive)
-        threshold = np.mean(rms) + np.std(rms)
-        voice_frames = rms > threshold
-        
-        if len(voice_frames) == 0:
-            return {
-                "voice_ratio": 0.0,
-                "pause_count": 0,
-                "avg_pause_duration": 0.0,
-                "dominance_score": 0.0,
-            }
-        
-        # Voice activity ratio
-        voice_ratio = np.sum(voice_frames) / len(voice_frames) if len(voice_frames) > 0 else 0.0
-        
-        # Find pauses (consecutive frames without voice)
-        voice_bool = voice_frames.astype(int)
-        pause_starts = np.where(np.diff(voice_bool) == -1)[0]
-        pause_ends = np.where(np.diff(voice_bool) == 1)[0]
-        
-        pause_count = len(pause_starts)
-        
-        if pause_count > 0:
-            pause_durations = (pause_ends[:len(pause_starts)] - pause_starts) * 512 / sr
-            avg_pause_duration = float(np.mean(pause_durations))
-        else:
-            avg_pause_duration = 0.0
-        
-        # Dominance score: high voice ratio + short pauses = dominating speaker
-        # (Not letting the other person speak)
-        dominance_score = min(voice_ratio * 0.7 + (1.0 - min(avg_pause_duration / 0.5, 1.0)) * 0.3, 1.0)
-        
-        self.dominance_history.append(dominance_score)
-        if len(self.dominance_history) > 10:
-            self.dominance_history.pop(0)
-        
-        return {
-            "voice_ratio": float(voice_ratio),
-            "pause_count": int(pause_count),
-            "avg_pause_duration": float(avg_pause_duration),
-            "dominance_score": float(dominance_score),
-        }
+        except Exception as e:
+            logger.error(f"Behavioral analysis error: {str(e)}")
+            return self._fallback_result(f"analysis error: {str(e)}")
 
-    def _extract_spectral_features(self, audio_chunk: np.ndarray, sr: int) -> Dict:
-        """
-        Extract spectral features indicating speech patterns.
-        
-        Args:
-            audio_chunk: Audio samples
-            sr: Sample rate
-            
-        Returns:
-            Dictionary with spectral metrics
-        """
-        # MFCC features for speech characterization
-        mfcc = librosa.feature.mfcc(y=audio_chunk, sr=sr, n_mfcc=13)
-        
-        # Spectral centroid
-        spectral_centroid = librosa.feature.spectral_centroid(y=audio_chunk, sr=sr)[0]
-        
-        # Spectral rolloff
-        spectral_rolloff = librosa.feature.spectral_rolloff(y=audio_chunk, sr=sr)[0]
-        
-        # MFCC statistics
-        mfcc_mean = np.mean(mfcc, axis=1)
-        mfcc_std = np.std(mfcc, axis=1)
-        
-        # Jitter-like metric: variability in energy
-        energy_variance = np.std(librosa.feature.rms(y=audio_chunk, frame_length=2048, hop_length=512)[0])
-        
-        return {
-            "spectral_centroid_mean": float(np.mean(spectral_centroid)),
-            "spectral_rolloff_mean": float(np.mean(spectral_rolloff)),
-            "mfcc_variance": float(np.mean(mfcc_std)),
-            "energy_variance": float(energy_variance),
-        }
+    # ----------------------------------------------------------------------
+    # AUDIO LOADING (same as acoustic.py)
+    # ----------------------------------------------------------------------
+    def _load_audio(self, audio_path: str) -> Optional[np.ndarray]:
+        """Load audio with multiple fallback methods."""
+        if not os.path.exists(audio_path):
+            logger.error(f"File not found: {audio_path}")
+            return None
 
-    def _compute_aggression_index(
-        self,
-        energy_features: Dict,
-        voice_features: Dict,
-        spectral_features: Dict
-    ) -> float:
-        """
-        Compute an overall aggression/pressure index from behavioral features.
-        
-        Args:
-            energy_features: Output from _extract_energy_features
-            voice_features: Output from _extract_voice_activity
-            spectral_features: Output from _extract_spectral_features
-            
-        Returns:
-            Aggression score from 0.0 to 1.0
-        """
-        # Weights for different behavioral indicators
-        volume_weight = 0.35  # High volume suggests aggression
-        dominance_weight = 0.40  # Not letting other person speak
-        spectral_weight = 0.25  # Voice characteristics
-        
-        # Combine features
-        volume_component = energy_features["volume_pressure"] * volume_weight
-        dominance_component = voice_features["dominance_score"] * dominance_weight
-        
-        # Spectral pressure: high energy variance + low pause suggests stress
-        spectral_pressure = (
-            spectral_features["energy_variance"] / (1.0 + spectral_features["energy_variance"]) * 0.5 +
-            (1.0 - min(voice_features["avg_pause_duration"] / 0.5, 1.0)) * 0.5
-        )
-        spectral_component = spectral_pressure * spectral_weight
-        
-        aggression_index = volume_component + dominance_component + spectral_component
-        return float(np.clip(aggression_index, 0.0, 1.0))
+        # Method 1: librosa
+        try:
+            audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True)
+            logger.info(f"Loaded with librosa: {len(audio)} samples")
+            return audio
+        except Exception as e:
+            logger.warning(f"librosa load failed: {e}")
 
-    def get_behavioral_trend(self) -> float:
+        # Method 2: pydub + ffmpeg
+        try:
+            from pydub import AudioSegment
+            import io
+            audio_seg = AudioSegment.from_file(audio_path)
+            audio_seg = audio_seg.set_frame_rate(self.sample_rate).set_channels(1)
+            wav_io = io.BytesIO()
+            audio_seg.export(wav_io, format='wav')
+            wav_io.seek(0)
+            audio, sr = librosa.load(wav_io, sr=self.sample_rate, mono=True)
+            logger.info(f"Loaded with pydub: {len(audio)} samples")
+            return audio
+        except Exception as e:
+            logger.warning(f"pydub load failed: {e}")
+
+        # Method 3: ffmpeg direct conversion
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+                tmp_path = tmp.name
+            cmd = [
+                'ffmpeg', '-i', audio_path,
+                '-acodec', 'pcm_s16le',
+                '-ar', str(self.sample_rate),
+                '-ac', '1',
+                tmp_path,
+                '-y'
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                raise Exception(f"ffmpeg error: {result.stderr}")
+            audio, sr = librosa.load(tmp_path, sr=self.sample_rate, mono=True)
+            os.unlink(tmp_path)
+            logger.info(f"Loaded with ffmpeg: {len(audio)} samples")
+            return audio
+        except Exception as e:
+            logger.error(f"All audio loading methods failed: {e}")
+            return None
+
+    # ----------------------------------------------------------------------
+    # BEHAVIORAL METRICS
+    # ----------------------------------------------------------------------
+    def _compute_speaker_dominance(self, audio: np.ndarray) -> float:
         """
-        Get trend of behavioral aggression over recent chunks.
-        
-        Returns:
-            Trend from -1.0 (improving) to 1.0 (worsening)
+        Speaker dominance: energy consistency and high-energy ratio.
         """
-        if len(self.dominance_history) < 2:
+        try:
+            energy = librosa.feature.rms(y=audio, frame_length=self.frame_length,
+                                         hop_length=self.hop_length)
+            energy_flat = energy.flatten()
+            if len(energy_flat) == 0:
+                return 0.0
+            mean_energy = np.mean(energy_flat)
+            std_energy = np.std(energy_flat)
+            # High-energy ratio (energy > mean+0.5*std)
+            high_energy_ratio = np.sum(energy_flat > (mean_energy + 0.5 * std_energy)) / len(energy_flat)
+            dominance = min(1.0, high_energy_ratio * 2.0)
+            return float(dominance)
+        except Exception as e:
+            logger.warning(f"Speaker dominance error: {e}")
             return 0.0
-        
-        recent = self.dominance_history[-5:]
-        if len(recent) < 2:
-            return 0.0
-        
-        trend = (recent[-1] - recent[0]) / len(recent) * 10
-        return float(np.clip(trend, -1.0, 1.0))
 
-    async def process_chunk(
-        self,
-        audio_chunk: np.ndarray,
-        sample_rate: int,
-        chunk_index: int
-    ) -> Dict:
+    def _compute_volume_pressure(self, audio: np.ndarray) -> float:
         """
-        Full behavioral analysis pipeline for audio chunk.
-        
-        Args:
-            audio_chunk: Audio samples
-            sample_rate: Sample rate
-            chunk_index: Chunk sequence number
-            
-        Returns:
-            Dictionary with behavioral analysis results
+        Volume pressure: dynamic range of RMS (in dB).
         """
-        energy_features = self._extract_energy_features(audio_chunk, sample_rate)
-        voice_features = self._extract_voice_activity(audio_chunk, sample_rate)
-        spectral_features = self._extract_spectral_features(audio_chunk, sample_rate)
-        
-        aggression_score = self._compute_aggression_index(
-            energy_features, voice_features, spectral_features
-        )
-        
+        try:
+            rms = librosa.feature.rms(y=audio, frame_length=self.frame_length,
+                                      hop_length=self.hop_length)
+            rms_flat = rms.flatten()
+            if len(rms_flat) == 0:
+                return 0.0
+            # Convert to dB
+            rms_db = librosa.amplitude_to_db(rms_flat, ref=np.max)
+            dynamic_range = np.max(rms_db) - np.min(rms_db)
+            # Normalise: typical range 0-60 dB
+            pressure = min(1.0, dynamic_range / 60.0)
+            return float(pressure)
+        except Exception as e:
+            logger.warning(f"Volume pressure error: {e}")
+            return 0.0
+
+    def _compute_speech_pause_ratio(self, audio: np.ndarray) -> float:
+        """
+        Speech/pause ratio: detects silence via energy threshold.
+        Returns stress indicator (0-1) where high values mean unusual pause pattern.
+        """
+        try:
+            energy = librosa.feature.rms(y=audio, frame_length=self.frame_length,
+                                         hop_length=self.hop_length)
+            energy_flat = energy.flatten()
+            if len(energy_flat) == 0:
+                return 0.0
+            threshold = np.max(energy_flat) * 0.15
+            speech_frames = energy_flat > threshold
+            if len(speech_frames) == 0:
+                return 0.0
+            speech_ratio = np.sum(speech_frames) / len(speech_frames)
+            pause_ratio = 1.0 - speech_ratio
+
+            # Stress: too much speech (aggressive) or too many pauses (nervous)
+            if pause_ratio < 0.1:
+                stress = 0.8
+            elif pause_ratio > 0.5:
+                stress = 0.6
+            else:
+                stress = 0.2
+            return float(stress)
+        except Exception as e:
+            logger.warning(f"Speech/pause ratio error: {e}")
+            return 0.0
+
+    def _compute_speaking_rate(self, audio: np.ndarray) -> float:
+        """
+        Speaking rate estimate via zero‑crossing rate (higher ZCR => faster speech).
+        Normalized to 0-1.
+        """
+        try:
+            zcr = librosa.feature.zero_crossing_rate(audio, frame_length=self.frame_length,
+                                                     hop_length=self.hop_length)
+            zcr_mean = np.mean(zcr)
+            # Typical ZCR for speech: 0.02-0.2; normalize to 0-1
+            rate = min(1.0, zcr_mean * 5.0)
+            return float(rate)
+        except Exception as e:
+            logger.warning(f"Speaking rate error: {e}")
+            return 0.0
+
+    def _fallback_result(self, error_msg: str = "unknown error") -> Dict[str, Any]:
+        """Return safe fallback values when analysis fails."""
         return {
-            "pillar": "behavioral",
-            "chunk_index": chunk_index,
-            "aggression_score": aggression_score,
-            "behavioral_trend": float(self.get_behavioral_trend()),
-            "energy_features": energy_features,
-            "voice_features": voice_features,
-            "spectral_features": spectral_features,
+            "speaker_dominance": 0.0,
+            "volume_pressure": 0.0,
+            "speech_pause_ratio": 0.0,
+            "speaking_rate": 0.0,
+            "pillar_score": 0.0,
+            "error": error_msg
         }

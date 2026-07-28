@@ -1,250 +1,160 @@
-"""
-Pillar I: Linguistic Agent - Semantic & Urgency Analysis
-
-Uses Groq API (Whisper Large-v3) for real-time audio transcription and scans
-transcribed text for high-urgency fraud keywords that indicate immediate action
-pressure (payment demanded, account compromised, legal threat, etc.).
-
-Maintains a dynamic keyword urgency scoring system that feeds into the game
-theory fusion engine.
-"""
-
 import os
-import numpy as np
-import soundfile as sf
-from typing import Dict, List, Optional, Tuple
-from groq import Groq
+import json
+import aiohttp
 import asyncio
-from functools import lru_cache
+import tempfile
+import subprocess
+from typing import Dict, Any, Optional
+import logging
+from dotenv import load_dotenv
 
+load_dotenv()
+logger = logging.getLogger(__name__)
 
-class LinguisticAgent:
-    """Semantic analysis using Groq Whisper and urgency keyword detection."""
-
-    # High-urgency fraud keywords with risk weights
-    URGENCY_KEYWORDS = {
-        # Payment/Financial Pressure
-        "payment": 0.8,
-        "pay now": 0.95,
-        "transfer": 0.85,
-        "urgent": 0.8,
-        "immediately": 0.85,
-        "right now": 0.9,
-        "bitcoin": 0.9,
-        "wire transfer": 0.9,
-        "money": 0.6,
-        "fee": 0.7,
-        "billing": 0.65,
-        
-        # Legal/Authority Threats
-        "irs": 0.95,
-        "court": 0.85,
-        "lawsuit": 0.85,
-        "legal": 0.7,
-        "arrest": 0.95,
-        "prison": 0.95,
-        "warrant": 0.9,
-        "police": 0.8,
-        
-        # Account Compromise
-        "account": 0.6,
-        "compromised": 0.85,
-        "hacked": 0.85,
-        "breach": 0.85,
-        "unauthorized": 0.75,
-        "suspicious activity": 0.8,
-        "locked": 0.7,
-        
-        # Identity/Social Engineering
-        "verify": 0.65,
-        "confirm": 0.6,
-        "password": 0.8,
-        "ssn": 0.9,
-        "social security": 0.9,
-        "credit card": 0.85,
-        "personal information": 0.75,
-        
-        # Generic Pressure
-        "don't hang up": 0.8,
-        "limited time": 0.85,
-        "act now": 0.85,
-        "don't tell anyone": 0.9,
-        "keep it quiet": 0.9,
-        "secret": 0.75,
-    }
-
-    def __init__(self):
-        """Initialize Groq client with API key from environment."""
+class LinguisticPillar:
+    """
+    Linguistic analysis pillar using Groq Whisper API.
+    Supports MP3, M4A, WebM, WAV, etc. via automatic conversion.
+    """
+    
+    def __init__(self, sample_rate: int = 16000):
         self.api_key = os.getenv("GROQ_API_KEY")
-        if not self.api_key:
-            raise ValueError("GROQ_API_KEY environment variable not set")
-        
-        self.client = Groq(api_key=self.api_key)
-        self.transcription_cache: Dict[str, str] = {}
-        self.urgency_history: List[float] = []
+        self.api_url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        self.sample_rate = sample_rate
+        self.urgency_keywords = [
+            "urgent", "immediately", "now", "quick", "emergency",
+            "bank", "account", "money", "payment", "transfer",
+            "social security", "credit card", "verify", "confirm",
+            "fraud", "suspicious", "alert", "warning",
+            "action required", "deadline", "limited time"
+        ]
+        if self.api_key:
+            logger.info("✅ GROQ_API_KEY is set (starts with %s)", self.api_key[:10])
+        else:
+            logger.error("❌ GROQ_API_KEY is MISSING")
 
-    async def transcribe_audio(self, audio_chunk: np.ndarray, sample_rate: int) -> str:
-        """
-        Transcribe audio chunk using Groq Whisper API.
-        
-        Args:
-            audio_chunk: Numpy array of audio samples
-            sample_rate: Sample rate of the audio
-            
-        Returns:
-            Transcribed text
-        """
-        # Save audio chunk to temporary file (Groq requires file upload)
-        temp_file = "/tmp/audio_chunk.wav"
+    async def analyze(self, audio_path: str) -> Dict[str, Any]:
+        """Analyze audio for linguistic patterns."""
         try:
-            sf.write(temp_file, audio_chunk, sample_rate)
-            
-            # Run in thread pool to avoid blocking
-            loop = asyncio.get_event_loop()
-            transcript = await loop.run_in_executor(
-                None,
-                self._transcribe_sync,
-                temp_file
-            )
-            return transcript
-        finally:
-            # Clean up temp file
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
+            # 1. Load audio and convert to temporary WAV (if needed)
+            wav_path = self._convert_to_wav(audio_path)
+            if wav_path is None:
+                return self._fallback_result("audio conversion failed")
 
-    def _transcribe_sync(self, audio_file: str) -> str:
-        """
-        Synchronous transcription call to Groq API.
-        
-        Args:
-            audio_file: Path to temporary audio file
-            
-        Returns:
-            Transcribed text
-        """
-        try:
-            with open(audio_file, "rb") as f:
-                transcript_response = self.client.audio.transcriptions.create(
-                    file=(audio_file, f, "audio/wav"),
-                    model="whisper-large-v3-turbo",
-                    language="en",
-                )
-            return transcript_response.text.lower() if transcript_response else ""
+            # 2. Transcribe with Groq
+            transcript = await self.transcribe_audio(wav_path)
+
+            # 3. Clean up temporary WAV if it was created
+            if wav_path != audio_path and os.path.exists(wav_path):
+                os.remove(wav_path)
+
+            # 4. Compute urgency and keywords
+            urgency_score = self.calculate_urgency_score(transcript)
+            keyword_matches = self.detect_keywords(transcript)
+
+            return {
+                "transcript": transcript,
+                "urgency_score": urgency_score,
+                "keyword_matches": keyword_matches,
+                "keyword_count": len(keyword_matches),
+                "pillar_score": min(1.0, urgency_score + (len(keyword_matches) * 0.05))
+            }
+
         except Exception as e:
-            print(f"Transcription error: {str(e)}")
-            return ""
+            logger.error(f"Linguistic analysis error: {str(e)}")
+            return self._fallback_result(str(e))
 
-    def score_transcript_urgency(self, transcript: str) -> float:
+    def _convert_to_wav(self, audio_path: str) -> Optional[str]:
         """
-        Score the transcribed text for fraud urgency signals.
-        
-        Returns a normalized urgency score from 0.0 (safe) to 1.0 (extreme threat).
-        
-        Args:
-            transcript: Transcribed text from audio
-            
-        Returns:
-            Urgency score between 0.0 and 1.0
+        Convert any audio file to WAV (16kHz, mono, PCM) using ffmpeg.
+        Returns path to WAV file (or original path if already WAV).
         """
+        if not os.path.exists(audio_path):
+            logger.error(f"File not found: {audio_path}")
+            return None
+
+        # If it's already a WAV, return as-is
+        if audio_path.lower().endswith('.wav'):
+            return audio_path
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+                wav_path = tmp.name
+            cmd = [
+                'ffmpeg', '-i', audio_path,
+                '-acodec', 'pcm_s16le',
+                '-ar', str(self.sample_rate),
+                '-ac', '1',
+                wav_path,
+                '-y'
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                logger.error(f"ffmpeg conversion failed: {result.stderr}")
+                return None
+            logger.info(f"Converted to WAV: {wav_path}")
+            return wav_path
+        except Exception as e:
+            logger.error(f"Conversion error: {e}")
+            return None
+
+    async def transcribe_audio(self, wav_path: str) -> str:
+        """Transcribe the WAV file using Groq Whisper API."""
+        if not self.api_key:
+            return self._fallback_transcription("Missing API key")
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                with open(wav_path, 'rb') as f:
+                    data = aiohttp.FormData()
+                    data.add_field('file', f, filename='audio.wav')
+                    data.add_field('model', 'whisper-large-v3')
+                    data.add_field('response_format', 'json')
+                    headers = {'Authorization': f'Bearer {self.api_key}'}
+
+                    logger.info(f"📡 Calling Groq API for {wav_path}")
+                    async with session.post(self.api_url, headers=headers, data=data, timeout=30) as resp:
+                        if resp.status == 200:
+                            result = await resp.json()
+                            transcript = result.get('text', '')
+                            logger.info(f"✅ Transcription successful: {transcript[:50]}...")
+                            return transcript
+                        else:
+                            error_text = await resp.text()
+                            logger.error(f"❌ Groq API error {resp.status}: {error_text}")
+                            return self._fallback_transcription(f"API error {resp.status}")
+        except asyncio.TimeoutError:
+            logger.error("❌ Groq API timeout")
+            return self._fallback_transcription("Timeout")
+        except Exception as e:
+            logger.error(f"❌ Transcription error: {str(e)}")
+            return self._fallback_transcription(str(e))
+
+    def calculate_urgency_score(self, transcript: str) -> float:
         if not transcript:
             return 0.0
-        
-        transcript_lower = transcript.lower()
-        matched_keywords = {}
-        
-        # Find all matching keywords and their weights
-        for keyword, weight in self.URGENCY_KEYWORDS.items():
-            if keyword in transcript_lower:
-                # Count occurrences
-                count = transcript_lower.count(keyword)
-                matched_keywords[keyword] = weight * min(count, 2)  # Cap at 2x weight for repetition
-        
-        if not matched_keywords:
-            urgency_score = 0.0
-        else:
-            # Average weight of matched keywords, with presence multiplier
-            avg_weight = sum(matched_keywords.values()) / len(matched_keywords)
-            presence_factor = min(len(matched_keywords) / 5, 1.0)  # Boost if many keywords present
-            urgency_score = min(avg_weight * (0.7 + 0.3 * presence_factor), 1.0)
-        
-        # Track history for trend analysis
-        self.urgency_history.append(urgency_score)
-        if len(self.urgency_history) > 10:
-            self.urgency_history.pop(0)
-        
-        return urgency_score
+        words = transcript.lower().split()
+        urgent = ["urgent","immediately","asap","now","quick","emergency","critical","important"]
+        urgent_count = sum(1 for w in words if w in urgent)
+        financial = ["bank","account","money","payment","transfer","credit","debit","card","funds","transaction"]
+        financial_count = sum(1 for w in words if w in financial)
+        return min(1.0, urgent_count * 0.2 + financial_count * 0.05)
 
-    def get_urgency_trend(self) -> float:
-        """
-        Get the trend of urgency over recent chunks.
-        
-        Returns:
-            Trend score from -1.0 (decreasing) to 1.0 (increasing)
-        """
-        if len(self.urgency_history) < 2:
-            return 0.0
-        
-        recent = self.urgency_history[-5:]  # Last 5 chunks
-        if len(recent) < 2:
-            return 0.0
-        
-        # Simple linear trend
-        trend = (recent[-1] - recent[0]) / len(recent) * 10
-        return np.clip(trend, -1.0, 1.0)
+    def detect_keywords(self, transcript: str) -> list:
+        if not transcript:
+            return []
+        t_lower = transcript.lower()
+        return [kw for kw in self.urgency_keywords if kw.lower() in t_lower]
 
-    def extract_keywords(self, transcript: str) -> List[Dict[str, any]]:
-        """
-        Extract all matched urgency keywords from transcript.
-        
-        Args:
-            transcript: Transcribed text
-            
-        Returns:
-            List of dicts with 'keyword', 'weight', and 'count'
-        """
-        transcript_lower = transcript.lower()
-        found_keywords = []
-        
-        for keyword, weight in self.URGENCY_KEYWORDS.items():
-            if keyword in transcript_lower:
-                count = transcript_lower.count(keyword)
-                found_keywords.append({
-                    "keyword": keyword,
-                    "weight": weight,
-                    "count": count
-                })
-        
-        # Sort by weight descending
-        found_keywords.sort(key=lambda x: x["weight"], reverse=True)
-        return found_keywords
+    def _fallback_transcription(self, reason: str = "") -> str:
+        return f"[Fallback: {reason}]"
 
-    async def process_chunk(
-        self,
-        audio_chunk: np.ndarray,
-        sample_rate: int,
-        chunk_index: int
-    ) -> Dict:
-        """
-        Full processing pipeline for a single audio chunk.
-        
-        Args:
-            audio_chunk: Audio samples
-            sample_rate: Sample rate
-            chunk_index: Chunk sequence number
-            
-        Returns:
-            Dictionary with transcription, urgency score, and keywords
-        """
-        transcript = await self.transcribe_audio(audio_chunk, sample_rate)
-        urgency_score = self.score_transcript_urgency(transcript)
-        keywords = self.extract_keywords(transcript)
-        
+    def _fallback_result(self, error_msg: str = "unknown error") -> Dict[str, Any]:
         return {
-            "pillar": "linguistic",
-            "chunk_index": chunk_index,
-            "transcript": transcript,
-            "urgency_score": float(urgency_score),
-            "urgency_trend": float(self.get_urgency_trend()),
-            "keywords": keywords,
-            "keyword_count": len(keywords),
+            "transcript": self._fallback_transcription(error_msg),
+            "urgency_score": 0.0,
+            "keyword_matches": [],
+            "keyword_count": 0,
+            "pillar_score": 0.0,
+            "error": error_msg
         }

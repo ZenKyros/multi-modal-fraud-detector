@@ -1,106 +1,82 @@
-import { useEffect, useRef, useCallback, useState } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 
-/**
- * Custom hook for managing WebSocket connections to the fraud detection backend.
- * Handles connection lifecycle, message sending/receiving, and automatic reconnection.
- */
-export const useWebSocket = (url, onMessage) => {
-  const wsRef = useRef(null)
+const useWebSocket = (url) => {
   const [isConnected, setIsConnected] = useState(false)
-  const [error, setError] = useState(null)
+  const [lastMessage, setLastMessage] = useState(null)
+  const wsRef = useRef(null)
   const reconnectTimeoutRef = useRef(null)
-  const reconnectAttempts = useRef(0)
-  const maxReconnectAttempts = 5
 
-  // Connect to WebSocket
   const connect = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) return
+
     try {
       const ws = new WebSocket(url)
+      wsRef.current = ws
 
       ws.onopen = () => {
-        console.log('[WebSocket] Connected')
+        console.log('🔗 WebSocket connected')
         setIsConnected(true)
-        setError(null)
-        reconnectAttempts.current = 0
+        // Clear any reconnect timeout if we succeeded
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current)
+          reconnectTimeoutRef.current = null
+        }
+      }
+
+      ws.onclose = (event) => {
+        console.log('🔌 WebSocket disconnected', event.code, event.reason)
+        setIsConnected(false)
+        // Attempt reconnect after delay (unless closed intentionally)
+        if (event.code !== 1000) { // Normal closure
+          reconnectTimeoutRef.current = setTimeout(() => {
+            console.log('🔄 Attempting WebSocket reconnect...')
+            connect()
+          }, 3000)
+        }
+      }
+
+      ws.onerror = (error) => {
+        console.error('💥 WebSocket error:', error)
+        // The browser will close the connection automatically; onclose will handle reconnect
       }
 
       ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          if (onMessage) {
-            onMessage(data)
-          }
-        } catch (e) {
-          console.error('Failed to parse WebSocket message:', e)
-        }
+        setLastMessage(event.data)
       }
+    } catch (error) {
+      console.error('💥 WebSocket connection error:', error)
+      // Retry after 3 seconds
+      reconnectTimeoutRef.current = setTimeout(() => connect(), 3000)
+    }
+  }, [url])
 
-      ws.onerror = (event) => {
-        console.error('[WebSocket] Error:', event)
-        setError('WebSocket connection error')
+  useEffect(() => {
+    connect()
+    return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current)
       }
-
-      ws.onclose = () => {
-        console.log('[WebSocket] Disconnected')
-        setIsConnected(false)
-
-        // Attempt to reconnect
-        if (reconnectAttempts.current < maxReconnectAttempts) {
-          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 30000)
-          console.log(`[WebSocket] Reconnecting in ${delay}ms...`)
-
-          reconnectTimeoutRef.current = setTimeout(() => {
-            reconnectAttempts.current += 1
-            connect()
-          }, delay)
-        } else {
-          setError('Max reconnection attempts reached')
-        }
+      if (wsRef.current) {
+        wsRef.current.close(1000, 'Component unmounting')
       }
-
-      wsRef.current = ws
-    } catch (e) {
-      console.error('[WebSocket] Connection error:', e)
-      setError(e.message)
     }
-  }, [url, onMessage])
+  }, [connect])
 
-  // Disconnect from WebSocket
-  const disconnect = useCallback(() => {
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current)
-    }
-    if (wsRef.current) {
-      wsRef.current.close()
-      wsRef.current = null
-    }
-    setIsConnected(false)
-  }, [])
-
-  // Send message through WebSocket
-  const send = useCallback((data) => {
+  const sendMessage = useCallback((data) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(data))
+      wsRef.current.send(data)
       return true
     } else {
-      console.warn('[WebSocket] Not connected, cannot send message')
+      console.warn('Cannot send message – WebSocket not open')
       return false
     }
   }, [])
 
-  // Setup connection on mount
-  useEffect(() => {
-    connect()
-
-    return () => {
-      disconnect()
-    }
-  }, [connect, disconnect])
-
   return {
     isConnected,
-    error,
-    send,
-    disconnect,
+    lastMessage,
+    sendMessage,
   }
 }
+
+export default useWebSocket

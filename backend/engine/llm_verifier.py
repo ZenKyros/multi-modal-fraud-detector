@@ -1,279 +1,172 @@
-"""
-LLM Verifier: Google Gemini API Validation Gate
-
-When the game-theoretic fusion engine produces a threat index > 0.55, the output
-gates through this verification layer. Uses Google Gemini to perform semantic
-validation and confirm the fraud classification before sending alerts.
-
-Enforces strict JSON schema to ensure parseable, structured responses.
-"""
-
 import os
 import json
+import aiohttp
 import asyncio
-from typing import Dict, Optional, List
-import google.generativeai as genai
+from typing import Dict, Any
+import logging
+from dotenv import load_dotenv
 
+load_dotenv()
+logger = logging.getLogger(__name__)
 
-class LLMVerifierGate:
-    """LLM-powered verification gate using Google Gemini API."""
-
-    # JSON schema that Gemini must conform to
-    VERIFICATION_SCHEMA = {
-        "type": "object",
-        "properties": {
-            "is_fraud": {
-                "type": "boolean",
-                "description": "Final determination: is this call fraudulent?"
-            },
-            "confidence": {
-                "type": "number",
-                "minimum": 0.0,
-                "maximum": 1.0,
-                "description": "Confidence level (0-1) of the determination"
-            },
-            "fraud_type": {
-                "type": "string",
-                "enum": ["scam", "phishing", "social_engineering", "financial_fraud", "impersonation", "unknown"],
-                "description": "Classification of fraud type if detected"
-            },
-            "key_indicators": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "List of key fraud indicators found"
-            },
-            "reasoning": {
-                "type": "string",
-                "description": "Concise explanation of the determination"
-            },
-            "recommendations": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Recommended actions (e.g., 'hang up', 'report to FTC')"
-            }
-        },
-        "required": ["is_fraud", "confidence", "fraud_type", "key_indicators", "reasoning", "recommendations"]
-    }
+class LLMVerifier:
+    """
+    LLM-based verification gate using Groq Chat API.
+    Uses Groq's LLM models (Llama, Mixtral) to evaluate fraud indicators.
+    """
 
     def __init__(self):
-        """Initialize Gemini client with API key from environment."""
-        self.api_key = os.getenv("GEMINI_API_KEY")
-        if not self.api_key:
-            raise ValueError("GEMINI_API_KEY environment variable not set")
-        
-        genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel("gemini-1.5-flash")
-        self.verification_cache: Dict[str, Dict] = {}
+        self.api_key = os.getenv("GROQ_API_KEY")  # Reuse same key
+        self.api_url = "https://api.groq.com/openai/v1/chat/completions"
+        self.model = "llama-3.3-70b-versatile"  # or "mixtral-8x7b-32768"
+        self.timeout = 15
 
-    async def verify_fraud_alert(
-        self,
-        transcript: str,
-        linguistic_data: Dict,
-        behavioral_data: Dict,
-        acoustic_data: Dict,
-        threat_index: float
-    ) -> Dict:
+        if self.api_key:
+            logger.info("✅ Using Groq LLM for verification")
+        else:
+            logger.error("❌ GROQ_API_KEY is MISSING, verification disabled")
+
+    async def verify(self, pillar_results: Dict[str, Any], threat_index: float, transcript: str = "") -> Dict[str, Any]:
         """
-        Verify fraud classification using Gemini LLM.
-        
-        Args:
-            transcript: Transcribed text from audio
-            linguistic_data: Output from linguistic pillar
-            behavioral_data: Output from behavioral pillar
-            acoustic_data: Output from acoustic pillar
-            threat_index: Combined threat index from game theory engine
-            
+        Verify fraud detection using Groq LLM.
+
         Returns:
-            Structured verification result matching VERIFICATION_SCHEMA
+            dict with is_fraud, confidence, reasons, recommended_action, verified
         """
-        # Create detailed context prompt
-        prompt = self._build_verification_prompt(
-            transcript, linguistic_data, behavioral_data, acoustic_data, threat_index
-        )
-        
-        # Run Gemini call in thread pool to avoid blocking
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, self._call_gemini_sync, prompt)
-        
-        return result
+        if not self.api_key:
+            logger.warning("No API key, using fallback")
+            return self._fallback_verification(threat_index)
 
-    def _build_verification_prompt(
-        self,
-        transcript: str,
-        linguistic_data: Dict,
-        behavioral_data: Dict,
-        acoustic_data: Dict,
-        threat_index: float
-    ) -> str:
-        """Build detailed prompt for Gemini to analyze."""
-        
-        prompt = f"""
-You are an expert fraud detection analyst. Analyze the following call data and determine if this is likely a fraudulent call.
+        try:
+            # Build prompt
+            prompt = self._build_prompt(pillar_results, threat_index, transcript)
 
-CALL TRANSCRIPT:
-{transcript}
+            # Call Groq API
+            response = await self._call_groq_api(prompt)
 
-AUDIO ANALYSIS DATA:
-- Linguistic Analysis: Urgency Score: {linguistic_data.get('urgency_score', 0):.2f}, Keywords: {linguistic_data.get('keyword_count', 0)} urgent phrases detected
-  Keywords: {', '.join([k['keyword'] for k in linguistic_data.get('keywords', [])[:5]])}
-  
-- Behavioral Analysis: Aggression Score: {behavioral_data.get('aggression_score', 0):.2f}
-  Dominance: {behavioral_data.get('voice_features', {}).get('dominance_score', 0):.2f}
-  Pause Duration: {behavioral_data.get('voice_features', {}).get('avg_pause_duration', 0):.2f}s
-  
-- Acoustic Analysis: Environment Index: {acoustic_data.get('environment_index', 0):.2f}
-  Noise Floor: {acoustic_data.get('noise_floor_features', {}).get('noise_elevation', 0):.2f}
-  Background: Call center indicators present
-  
-COMBINED THREAT INDEX: {threat_index:.2f} / 1.0
+            # Parse response
+            parsed = self._parse_response(response)
+            parsed["verified"] = True
+            return parsed
 
-Based on this data, determine:
-1. Is this likely a fraudulent call? (true/false)
-2. What type of fraud if detected?
-3. Key indicators that support your determination
-4. Confidence level in your assessment
-5. Recommended actions
+        except asyncio.TimeoutError:
+            logger.error("Groq LLM timeout")
+            return self._fallback_verification(threat_index)
+        except Exception as e:
+            logger.error(f"Groq verification error: {str(e)}")
+            return self._fallback_verification(threat_index)
 
-Provide your response ONLY as valid JSON conforming to this schema:
+    def _build_prompt(self, pillar_results: Dict[str, Any], threat_index: float, transcript: str) -> str:
+        """Build a structured prompt for the LLM."""
+        linguistic = pillar_results.get("linguistic", {})
+        behavioral = pillar_results.get("behavioral", {})
+        acoustic = pillar_results.get("acoustic", {})
+
+        transcript_short = transcript[:500] + "..." if len(transcript) > 500 else transcript
+
+        prompt = f"""You are a fraud detection expert analyzing a phone call.
+
+Context:
+- Threat Index (0-1): {threat_index:.2f} (threshold for fraud is 0.55)
+- Transcript (partial): {transcript_short}
+
+Pillar Analysis:
+1. Linguistic:
+   - Urgency Score: {linguistic.get('urgency_score', 0):.2f}
+   - Urgency Keywords: {linguistic.get('keyword_matches', [])}
+   - Pillar Score: {linguistic.get('pillar_score', 0):.2f}
+
+2. Behavioral:
+   - Speaker Dominance: {behavioral.get('speaker_dominance', 0):.2f}
+   - Volume Pressure: {behavioral.get('volume_pressure', 0):.2f}
+   - Speech/Pause Ratio: {behavioral.get('speech_pause_ratio', 0):.2f}
+   - Speaking Rate: {behavioral.get('speaking_rate', 0):.2f}
+   - Pillar Score: {behavioral.get('pillar_score', 0):.2f}
+
+3. Acoustic:
+   - Noise Floor: {acoustic.get('noise_floor', 0):.2f}
+   - Background Classification: {acoustic.get('background_classification', 0):.2f}
+   - Environment Type: {acoustic.get('environment_type', 'unknown')}
+   - Pillar Score: {acoustic.get('pillar_score', 0):.2f}
+
+Question:
+Based on this data, is this call likely a fraud/scam attempt?
+Provide a structured answer in valid JSON only (no extra text) with the following fields:
 {{
-    "is_fraud": boolean,
-    "confidence": number (0-1),
-    "fraud_type": string (one of: "scam", "phishing", "social_engineering", "financial_fraud", "impersonation", "unknown"),
-    "key_indicators": [array of strings],
-    "reasoning": string,
-    "recommendations": [array of strings]
+  "is_fraud": boolean,
+  "confidence": float (0-1),
+  "reasons": [string, string, ...] (at least 2 reasons),
+  "recommended_action": string (one of: "Block", "Warn", "Monitor", "Ignore")
 }}
-"""
+
+Be objective and cite the evidence."""
         return prompt
 
-    def _call_gemini_sync(self, prompt: str) -> Dict:
-        """
-        Synchronous call to Gemini API.
-        
-        Args:
-            prompt: Detailed verification prompt
-            
-        Returns:
-            Parsed JSON response matching schema
-        """
+    async def _call_groq_api(self, prompt: str) -> Dict[str, Any]:
+        """Send request to Groq Chat API."""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": "You are a fraud detection expert. Respond only with JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.3,
+            "max_tokens": 300,
+            "response_format": {"type": "json_object"}  # Groq supports this
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.api_url, json=payload, headers=headers, timeout=self.timeout) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    logger.error(f"Groq API error {resp.status}: {error_text}")
+                    raise Exception(f"API error {resp.status}: {error_text}")
+                return await resp.json()
+
+    def _parse_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract the JSON answer from Groq response."""
         try:
-            response = self.model.generate_content(prompt)
-            
-            if not response or not response.text:
-                return self._default_verification_response()
-            
-            # Extract JSON from response
-            response_text = response.text.strip()
-            
-            # Try to find JSON in the response
-            if response_text.startswith("{"):
-                json_str = response_text
-            else:
-                # Look for JSON block
-                import re
-                match = re.search(r'\{.*\}', response_text, re.DOTALL)
-                if match:
-                    json_str = match.group(0)
-                else:
-                    return self._default_verification_response()
-            
+            # Groq returns OpenAI-like structure
+            choices = response.get("choices", [])
+            if not choices:
+                raise ValueError("No choices in response")
+            message = choices[0].get("message", {})
+            content = message.get("content", "")
+            if not content:
+                raise ValueError("No content in message")
+
             # Parse JSON
-            result = json.loads(json_str)
-            
-            # Validate against schema
-            result = self._validate_response(result)
-            
-            return result
-            
-        except json.JSONDecodeError:
-            return self._default_verification_response()
+            data = json.loads(content)
+
+            # Ensure required fields
+            data["is_fraud"] = bool(data.get("is_fraud", False))
+            data["confidence"] = float(data.get("confidence", 0.5))
+            data["confidence"] = max(0.0, min(1.0, data["confidence"]))
+            if not isinstance(data.get("reasons"), list):
+                data["reasons"] = [str(data["reasons"])] if data.get("reasons") else ["No specific reasons given."]
+            data["recommended_action"] = str(data.get("recommended_action", "Monitor"))
+
+            return data
+
         except Exception as e:
-            print(f"Gemini API error: {str(e)}")
-            return self._default_verification_response()
+            logger.error(f"Failed to parse Groq response: {e}")
+            return {
+                "is_fraud": False,
+                "confidence": 0.5,
+                "reasons": ["LLM response parsing failed, using fallback."],
+                "recommended_action": "Monitor"
+            }
 
-    def _validate_response(self, response: Dict) -> Dict:
-        """
-        Validate response matches schema and fill in defaults if needed.
-        
-        Args:
-            response: Response from Gemini
-            
-        Returns:
-            Validated response
-        """
-        validated = {
-            "is_fraud": bool(response.get("is_fraud", False)),
-            "confidence": float(response.get("confidence", 0.5)),
-            "fraud_type": str(response.get("fraud_type", "unknown")),
-            "key_indicators": list(response.get("key_indicators", [])),
-            "reasoning": str(response.get("reasoning", "Analysis inconclusive")),
-            "recommendations": list(response.get("recommendations", [])),
-        }
-        
-        # Validate confidence range
-        validated["confidence"] = float(max(0.0, min(1.0, validated["confidence"])))
-        
-        # Validate fraud_type
-        valid_types = ["scam", "phishing", "social_engineering", "financial_fraud", "impersonation", "unknown"]
-        if validated["fraud_type"] not in valid_types:
-            validated["fraud_type"] = "unknown"
-        
-        return validated
-
-    def _default_verification_response(self) -> Dict:
-        """Return a safe default response when verification fails."""
+    def _fallback_verification(self, threat_index: float) -> Dict[str, Any]:
+        """Rule-based fallback when LLM is unavailable."""
         return {
-            "is_fraud": False,
-            "confidence": 0.3,
-            "fraud_type": "unknown",
-            "key_indicators": [],
-            "reasoning": "Could not verify due to API limitations. Treat with caution.",
-            "recommendations": ["Review manually", "Contact call recipient for confirmation"],
+            "is_fraud": threat_index > 0.65,
+            "confidence": min(threat_index * 0.8, 0.9),
+            "reasons": ["LLM verification unavailable – using rule-based fallback."],
+            "recommended_action": "Investigate" if threat_index > 0.65 else "Monitor",
+            "verified": False
         }
-
-    async def batch_verify(
-        self,
-        verification_requests: List[Dict]
-    ) -> List[Dict]:
-        """
-        Verify multiple calls (useful for batch processing).
-        
-        Args:
-            verification_requests: List of call data dicts
-            
-        Returns:
-            List of verification results
-        """
-        results = []
-        for request in verification_requests:
-            result = await self.verify_fraud_alert(
-                request["transcript"],
-                request["linguistic_data"],
-                request["behavioral_data"],
-                request["acoustic_data"],
-                request["threat_index"]
-            )
-            results.append(result)
-        
-        return results
-
-    def is_response_valid(self, response: Dict) -> bool:
-        """
-        Check if response is valid and has sufficient confidence.
-        
-        Args:
-            response: Verification response
-            
-        Returns:
-            Whether the response should be trusted
-        """
-        required_fields = {"is_fraud", "confidence", "fraud_type", "key_indicators", "reasoning", "recommendations"}
-        
-        if not all(field in response for field in required_fields):
-            return False
-        
-        # High confidence is good, but also accept unanimous decisions with moderate confidence
-        if response.get("is_fraud", False) and response.get("confidence", 0) >= 0.6:
-            return True
-        
-        return False

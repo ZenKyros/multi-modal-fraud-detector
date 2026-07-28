@@ -1,14 +1,13 @@
 {
   "name": "multi-modal-fraud-detector",
   "version": "1.0.0",
-  "description": "Real-time multi-modal fraud detection using game theory and parallel LLM analysis",
-  "private": true,
   "scripts": {
-    "frontend:dev": "cd frontend && npm run dev",
-    "frontend:build": "cd frontend && npm run build",
-    "frontend:preview": "cd frontend && npm run preview"
+    "start": "concurrently \"npm run backend\" \"npm run frontend\"",
+    "backend": "cd backend && python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000",
+    "frontend": "cd frontend && npm run dev",
+    "install-all": "cd backend && pip install -r requirements.txt && cd ../frontend && npm install"
   },
-  "keywords": ["fraud-detection", "game-theory", "audio-analysis", "machine-learning"],
-  "author": "AI Solutions Architect",
-  "license": "MIT"
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
 }

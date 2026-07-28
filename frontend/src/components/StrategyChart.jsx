@@ -1,217 +1,124 @@
-import React from 'react'
-import { LineChart, Line, RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import React, { useEffect, useRef } from 'react'
 
-/**
- * StrategyChart Component
- * 
- * Displays:
- * 1. Dynamic line chart of threat index history
- * 2. Radar chart of current pillar weights (Nash Equilibrium strategy)
- * 3. Game theory adaptation metrics
- */
-function StrategyChart({ weights, threatHistory, strategyMetrics }) {
-  // Prepare threat history data for chart
-  const threatData = threatHistory.map((value, index) => ({
-    chunk: index + 1,
-    threat: (value * 100).toFixed(1),
-  }))
+const StrategyChart = ({ weights, threatIndex }) => {
+  const canvasRef = useRef(null)
 
-  // Prepare radar data for pillar weights
-  const radarData = [
-    {
-      name: 'Linguistic',
-      current: (weights[0] * 100).toFixed(1),
-      optimal: 33.3,
-    },
-    {
-      name: 'Behavioral',
-      current: (weights[1] * 100).toFixed(1),
-      optimal: 33.3,
-    },
-    {
-      name: 'Acoustic',
-      current: (weights[2] * 100).toFixed(1),
-      optimal: 33.3,
-    },
-  ]
+  useEffect(() => {
+    const canvas = canvasRef.current
+    const ctx = canvas.getContext('2d')
+    const width = canvas.width
+    const height = canvas.height
+
+    // Clear
+    ctx.clearRect(0, 0, width, height)
+
+    // Background (transparent)
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.3)' // slate-900/30
+    ctx.fillRect(0, 0, width, height)
+
+    // Chart title
+    ctx.fillStyle = 'rgba(255,255,255,0.7)'
+    ctx.font = '600 13px Inter, sans-serif'
+    ctx.textAlign = 'center'
+    ctx.fillText('Nash Equilibrium Strategy Weights', width / 2, 28)
+
+    // Dimensions
+    const barWidth = 70
+    const gap = 50
+    const startX = (width - (barWidth * 3 + gap * 2)) / 2
+    const bottomY = height - 50
+    const maxHeight = height - 80
+
+    const strategies = ['Linguistic', 'Behavioral', 'Acoustic']
+    const colors = ['#06b6d4', '#10b981', '#a855f7'] // cyan, emerald, purple
+    const values = [
+      weights?.linguistic || 0.33,
+      weights?.behavioral || 0.33,
+      weights?.acoustic || 0.33
+    ]
+
+    // Draw bars with gradient and shadow
+    strategies.forEach((strategy, index) => {
+      const x = startX + index * (barWidth + gap)
+      const barHeight = values[index] * maxHeight
+      const y = bottomY - barHeight
+
+      // Shadow
+      ctx.shadowColor = 'rgba(0,0,0,0.3)'
+      ctx.shadowBlur = 12
+      ctx.shadowOffsetY = 4
+
+      // Gradient
+      const grad = ctx.createLinearGradient(x, y, x, bottomY)
+      const color = colors[index]
+      grad.addColorStop(0, color)
+      grad.addColorStop(1, color + '66')
+      ctx.fillStyle = grad
+
+      // Rounded rectangle
+      const radius = 6
+      ctx.beginPath()
+      ctx.moveTo(x + radius, y)
+      ctx.lineTo(x + barWidth - radius, y)
+      ctx.quadraticCurveTo(x + barWidth, y, x + barWidth, y + radius)
+      ctx.lineTo(x + barWidth, bottomY)
+      ctx.lineTo(x, bottomY)
+      ctx.lineTo(x, y + radius)
+      ctx.quadraticCurveTo(x, y, x + radius, y)
+      ctx.closePath()
+      ctx.fill()
+
+      // Reset shadow
+      ctx.shadowBlur = 0
+
+      // Value text
+      ctx.fillStyle = '#ffffff'
+      ctx.font = 'bold 13px Inter, sans-serif'
+      ctx.textAlign = 'center'
+      ctx.fillText(
+        `${(values[index] * 100).toFixed(0)}%`,
+        x + barWidth / 2,
+        y - 10
+      )
+
+      // Label
+      ctx.fillStyle = 'rgba(255,255,255,0.5)'
+      ctx.font = '11px Inter, sans-serif'
+      ctx.fillText(strategy, x + barWidth / 2, bottomY + 20)
+    })
+
+    // Threat index indicator
+    if (threatIndex !== undefined) {
+      const threatX = width - 140
+      const threatY = 20
+      ctx.fillStyle = 'rgba(239, 68, 68, 0.15)'
+      ctx.roundRect(threatX, threatY, 120, 24, 12)
+      ctx.fill()
+
+      ctx.fillStyle = '#f87171'
+      ctx.font = '11px Inter, sans-serif'
+      ctx.textAlign = 'left'
+      ctx.fillText(`⚠️ Threat: ${(threatIndex * 100).toFixed(1)}%`, threatX + 12, threatY + 16)
+    }
+
+    // Add a subtle grid line at bottom
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(30, bottomY)
+    ctx.lineTo(width - 30, bottomY)
+    ctx.stroke()
+
+  }, [weights, threatIndex])
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      {/* Threat Timeline Chart */}
-      <div className="cyber-card">
-        <h3 className="font-mono font-bold text-sm text-cyber-cyan mb-4">Threat Index Timeline</h3>
-
-        {threatHistory.length > 0 ? (
-          <ResponsiveContainer width="100%" height={250}>
-            <LineChart data={threatData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(0, 217, 255, 0.1)" />
-              <XAxis
-                dataKey="chunk"
-                stroke="rgba(200, 200, 200, 0.5)"
-                style={{ fontSize: '12px', fontFamily: 'monospace' }}
-              />
-              <YAxis
-                stroke="rgba(200, 200, 200, 0.5)"
-                domain={[0, 100]}
-                style={{ fontSize: '12px', fontFamily: 'monospace' }}
-              />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: 'rgba(10, 14, 39, 0.9)',
-                  border: '1px solid rgba(0, 217, 255, 0.3)',
-                  borderRadius: '4px',
-                  fontFamily: 'monospace',
-                }}
-                labelStyle={{ color: '#00d9ff' }}
-                formatter={(value) => [`${value}%`, 'Threat']}
-              />
-
-              {/* Threat line with color zones */}
-              <Line
-                type="monotone"
-                dataKey="threat"
-                stroke="url(#threatGradient)"
-                strokeWidth={2}
-                dot={false}
-                isAnimationActive={false}
-              />
-
-              {/* Threshold lines */}
-              <line
-                x1="0"
-                y1="55%"
-                x2="100%"
-                y2="55%"
-                stroke="rgba(255, 0, 85, 0.2)"
-                strokeDasharray="5 5"
-              />
-            </LineChart>
-          </ResponsiveContainer>
-        ) : (
-          <div className="h-64 flex items-center justify-center text-gray-500 font-mono text-sm">
-            No threat data yet
-          </div>
-        )}
-
-        {/* Threshold indicator */}
-        <div className="flex justify-between mt-4 text-xs font-mono text-gray-400">
-          <span>0%</span>
-          <span className="text-cyber-red">55% Verification Threshold</span>
-          <span>100%</span>
-        </div>
-      </div>
-
-      {/* Strategy Weights Radar */}
-      <div className="cyber-card">
-        <h3 className="font-mono font-bold text-sm text-cyber-cyan mb-4">Pillar Weight Distribution</h3>
-
-        <ResponsiveContainer width="100%" height={250}>
-          <RadarChart data={radarData} margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
-            <PolarGrid stroke="rgba(0, 217, 255, 0.1)" />
-            <PolarAngleAxis
-              dataKey="name"
-              stroke="rgba(200, 200, 200, 0.6)"
-              style={{ fontSize: '11px', fontFamily: 'monospace' }}
-            />
-            <PolarRadiusAxis
-              angle={90}
-              domain={[0, 100]}
-              stroke="rgba(200, 200, 200, 0.3)"
-              style={{ fontSize: '10px', fontFamily: 'monospace' }}
-            />
-
-            <Radar
-              name="Current Weights"
-              dataKey="current"
-              stroke="#0066ff"
-              fill="#0066ff"
-              fillOpacity={0.3}
-              isAnimationActive={false}
-            />
-            <Radar
-              name="Baseline (33%)"
-              dataKey="optimal"
-              stroke="rgba(200, 200, 200, 0.4)"
-              fill="none"
-              strokeDasharray="5 5"
-              isAnimationActive={false}
-            />
-
-            <Legend
-              wrapperStyle={{ fontFamily: 'monospace', fontSize: '12px', paddingTop: '20px' }}
-              textColor="rgba(200, 200, 200, 0.8)"
-            />
-          </RadarChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Strategy Metrics */}
-      <div className="lg:col-span-2 cyber-card">
-        <h3 className="font-mono font-bold text-sm text-cyber-cyan mb-4">Game Theory Metrics</h3>
-
-        {strategyMetrics ? (
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="bg-cyber-darker rounded p-3">
-              <p className="text-xs text-gray-400 font-mono mb-1">Game Round</p>
-              <p className="text-lg font-mono font-bold text-cyber-cyan">
-                {strategyMetrics.round || 0}
-              </p>
-            </div>
-
-            <div className="bg-cyber-darker rounded p-3">
-              <p className="text-xs text-gray-400 font-mono mb-1">Strategy Entropy</p>
-              <p className="text-lg font-mono font-bold text-cyber-blue">
-                {(strategyMetrics.strategy_entropy || 0).toFixed(2)}
-              </p>
-              <p className="text-xs text-gray-500 font-mono mt-1">(0=Pure, 1.58=Mixed)</p>
-            </div>
-
-            <div className="bg-cyber-darker rounded p-3">
-              <p className="text-xs text-gray-400 font-mono mb-1">Linguistic Weight</p>
-              <p className="text-lg font-mono font-bold text-cyber-cyan">
-                {((strategyMetrics.defender_strategy?.[0] || 0) * 100).toFixed(0)}%
-              </p>
-            </div>
-
-            <div className="bg-cyber-darker rounded p-3">
-              <p className="text-xs text-gray-400 font-mono mb-1">Behavioral Weight</p>
-              <p className="text-lg font-mono font-bold text-cyber-blue">
-                {((strategyMetrics.defender_strategy?.[1] || 0) * 100).toFixed(0)}%
-              </p>
-            </div>
-
-            <div className="bg-cyber-darker rounded p-3">
-              <p className="text-xs text-gray-400 font-mono mb-1">Acoustic Weight</p>
-              <p className="text-lg font-mono font-bold text-cyber-purple">
-                {((strategyMetrics.defender_strategy?.[2] || 0) * 100).toFixed(0)}%
-              </p>
-            </div>
-
-            <div className="bg-cyber-darker rounded p-3">
-              <p className="text-xs text-gray-400 font-mono mb-1">Last Threat Index</p>
-              <p className="text-lg font-mono font-bold text-cyber-red">
-                {(strategyMetrics.threat_history?.[strategyMetrics.threat_history?.length - 1] || 0).toFixed(2)}
-              </p>
-            </div>
-
-            <div className="bg-cyber-darker rounded p-3">
-              <p className="text-xs text-gray-400 font-mono mb-1">Threat Count (>0.55)</p>
-              <p className="text-lg font-mono font-bold text-cyber-red">
-                {strategyMetrics.threat_history?.filter((t) => t > 0.55).length || 0}
-              </p>
-            </div>
-
-            <div className="bg-cyber-darker rounded p-3">
-              <p className="text-xs text-gray-400 font-mono mb-1">Max Threat</p>
-              <p className="text-lg font-mono font-bold text-cyber-red">
-                {Math.max(...(strategyMetrics.threat_history || [0])).toFixed(2)}
-              </p>
-            </div>
-          </div>
-        ) : (
-          <div className="text-gray-500 font-mono text-sm">No strategy data available</div>
-        )}
-      </div>
+    <div className="glass-card p-4">
+      <canvas
+        ref={canvasRef}
+        width={600}
+        height={280}
+        className="w-full h-auto rounded-xl"
+      />
     </div>
   )
 }

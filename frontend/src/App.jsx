@@ -1,281 +1,310 @@
-import React, { useState, useCallback, useEffect } from 'react'
-import { AlertCircle, Activity } from 'lucide-react'
+import React, { useState, useEffect, useRef } from 'react'
 import Sidebar from './components/Sidebar'
 import TelemetryCard from './components/TelemetryCard'
 import StrategyChart from './components/StrategyChart'
 import Transcript from './components/Transcript'
 import AlertBanner from './components/AlertBanner'
-import { useWebSocket } from './hooks/useWebSocket'
+import useWebSocket from './hooks/useWebSocket'
 
-/**
- * Root Application Component
- * 
- * Multi-Modal Fraud Detector Dashboard
- * Orchestrates real-time analysis visualization with parallel pillar monitoring
- */
 function App() {
-  // WebSocket configuration
-  const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8000'
-
-  // State management
-  const [selectedFile, setSelectedFile] = useState('scam_call.wav')
-  const [currentChunk, setCurrentChunk] = useState(0)
-  const [isAnalyzing, setIsAnalyzing] = useState(false)
-  const [autoPlay, setAutoPlay] = useState(true)
-
-  // Analysis results
-  const [latestResult, setLatestResult] = useState(null)
+  // ─── State ─────────────────────────────────────────────────────────────
+  const [isRecording, setIsRecording] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [isConnected, setIsConnected] = useState(false)
+  const [threatIndex, setThreatIndex] = useState(0)
+  const [pillarData, setPillarData] = useState({
+    linguistic: { score: 0, details: {} },
+    behavioral: { score: 0, details: {} },
+    acoustic: { score: 0, details: {} }
+  })
+  const [strategyWeights, setStrategyWeights] = useState({
+    linguistic: 0.33,
+    behavioral: 0.33,
+    acoustic: 0.33
+  })
   const [transcripts, setTranscripts] = useState([])
-  const [threatHistory, setThreatHistory] = useState([])
-  const [strategyMetrics, setStrategyMetrics] = useState(null)
-  const [verificationResult, setVerificationResult] = useState(null)
+  const [alert, setAlert] = useState(null)
 
-  // UI state
-  const [error, setError] = useState(null)
-  const [maxChunks, setMaxChunks] = useState(0)
+  // ─── Refs ──────────────────────────────────────────────────────────────
+  const mediaRecorderRef = useRef(null)
 
-  // WebSocket message handler
-  const handleWebSocketMessage = useCallback((message) => {
-    if (message.type === 'analysis_result') {
-      const data = message.data
+  // ─── WebSocket ─────────────────────────────────────────────────────────
+  const wsUrl = import.meta.env.VITE_API_URL
+    ? `ws://${new URL(import.meta.env.VITE_API_URL).host}/ws/analyze`
+    : 'ws://localhost:8000/ws/analyze'
 
-      // Update threat history
-      setThreatHistory((prev) => {
-        const updated = [...prev, data.threat_index]
-        return updated.slice(-50) // Keep last 50
-      })
+  const { sendMessage, lastMessage, isConnected: wsConnected } = useWebSocket(wsUrl)
 
-      // Update transcript
-      if (data.transcript) {
-        setTranscripts((prev) => [
-          ...prev,
-          {
-            chunk: data.chunk_index,
-            text: data.transcript,
-            timestamp: data.timestamp,
-          },
-        ])
-      }
-
-      // Update latest result
-      setLatestResult(data)
-
-      // Update strategy
-      if (data.game_state) {
-        setStrategyMetrics(data.game_state)
-      }
-
-      // Update verification if present
-      if (data.verification) {
-        setVerificationResult(data.verification)
-      }
-
-      // Auto-advance to next chunk
-      if (autoPlay && currentChunk < maxChunks - 1) {
-        setTimeout(() => {
-          setCurrentChunk((prev) => prev + 1)
-        }, 1000)
-      }
-
-      setError(null)
-      setIsAnalyzing(false)
-    } else if (message.type === 'error') {
-      setError(message.message)
-      setIsAnalyzing(false)
-    } else if (message.type === 'strategy_update') {
-      setStrategyMetrics(message.data)
-    }
-  }, [currentChunk, maxChunks, autoPlay])
-
-  // Initialize WebSocket connection
-  const { isConnected, send: sendWS } = useWebSocket(wsUrl, handleWebSocketMessage)
-
-  // Fetch file metadata
+  // ─── Effects ──────────────────────────────────────────────────────────
   useEffect(() => {
-    const fetchMetadata = async () => {
+    setIsConnected(wsConnected)
+  }, [wsConnected])
+
+  useEffect(() => {
+    if (lastMessage) {
       try {
-        const response = await fetch(
-          `${import.meta.env.VITE_API_URL}/api/files/${selectedFile}/metadata`
-        )
-        const data = await response.json()
-        setMaxChunks(data.chunk_count)
-        setCurrentChunk(0)
-      } catch (err) {
-        console.error('Failed to fetch file metadata:', err)
+        const data = JSON.parse(lastMessage)
+        if (data.type === 'analysis_result') {
+          updateDashboard(data.data)
+        } else if (data.type === 'error') {
+          console.error('WebSocket error:', data.message)
+        }
+      } catch (error) {
+        console.error('Error parsing WebSocket message:', error)
       }
     }
+  }, [lastMessage])
 
-    if (selectedFile) {
-      fetchMetadata()
-    }
-  }, [selectedFile])
-
-  // Handle chunk analysis
-  const handleAnalyzeChunk = useCallback(() => {
-    if (!isConnected) {
-      setError('WebSocket not connected')
-      return
-    }
-
-    setIsAnalyzing(true)
-    setError(null)
-
-    sendWS({
-      action: 'analyze',
-      audio_file: selectedFile,
-      chunk_index: currentChunk,
-    })
-  }, [isConnected, sendWS, selectedFile, currentChunk])
-
-  // Handle file selection
-  const handleFileSelect = (file) => {
-    setSelectedFile(file)
-    setCurrentChunk(0)
-    setLatestResult(null)
-    setTranscripts([])
-    setThreatHistory([])
-    setVerificationResult(null)
-  }
-
-  // Handle live recording
-  const handleLiveRecording = useCallback((recordingData) => {
-    if (!isConnected) {
-      setError('WebSocket not connected')
-      return
-    }
-
-    setIsAnalyzing(true)
-    setError(null)
-
-    // Convert audio data to base64 for transmission
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      const base64Audio = btoa(
-        new Uint8Array(e.target.result).reduce((data, byte) => data + String.fromCharCode(byte), '')
-      )
-
-      sendWS({
-        action: 'analyze_live',
-        audio_data: base64Audio,
-        format: recordingData.format,
-        timestamp: recordingData.timestamp,
+  // ─── Dashboard Update ────────────────────────────────────────────────
+  const updateDashboard = (data) => {
+    if (data.pillar_results) {
+      const results = data.pillar_results
+      setPillarData({
+        linguistic: {
+          score: results.linguistic?.pillar_score || 0,
+          details: results.linguistic || {}
+        },
+        behavioral: {
+          score: results.behavioral?.pillar_score || 0,
+          details: results.behavioral || {}
+        },
+        acoustic: {
+          score: results.acoustic?.pillar_score || 0,
+          details: results.acoustic || {}
+        }
       })
     }
-    reader.readAsArrayBuffer(recordingData.audio)
-  }, [isConnected, sendWS])
 
-  // Handle recording error
-  const handleRecordingError = useCallback((errorMsg) => {
-    setError(errorMsg)
-  }, [])
+    if (data.threat_index !== undefined) {
+      setThreatIndex(data.threat_index)
+    }
 
-  // Get threat level
-  const getThreatLevel = () => {
-    if (!latestResult) return 'safe'
-    const ti = latestResult.threat_index
-    if (ti < 0.3) return 'safe'
-    if (ti < 0.55) return 'medium'
-    if (ti < 0.8) return 'high'
-    return 'critical'
+    if (data.strategy_weights) {
+      setStrategyWeights(data.strategy_weights)
+    }
+
+    if (data.pillar_results?.linguistic?.transcript) {
+      setTranscripts(prev => [
+        ...prev,
+        {
+          text: data.pillar_results.linguistic.transcript,
+          timestamp: data.timestamp || Date.now(),
+          isFraud: data.is_fraud || false
+        }
+      ].slice(-50)) // Keep last 50 entries
+    }
+
+    // Update alert
+    if (data.is_fraud) {
+      setAlert({
+        type: 'danger',
+        message: '🚨 Fraud Detected!',
+        details: data.verification?.reasons?.join(', ') || 'Multiple fraud indicators detected'
+      })
+    } else if (data.threat_index > 0.4) {
+      setAlert({
+        type: 'warning',
+        message: '⚠️ Suspicious Activity',
+        details: 'Threat index approaching threshold'
+      })
+    } else {
+      setAlert(null)
+    }
   }
 
-  return (
-    <div className="min-h-screen bg-cyber-darker text-white overflow-hidden">
-      {/* Background scan effect */}
-      <div className="fixed inset-0 scan-line pointer-events-none opacity-5 z-0" />
+  // ─── Recording ────────────────────────────────────────────────────────
+  const processAudioChunk = async (blob) => {
+    if (!wsConnected) return
+    try {
+      const reader = new FileReader()
+      reader.onloadend = () => {
+        const base64Audio = reader.result.split(',')[1]
+        sendMessage(JSON.stringify({
+          type: 'audio_chunk',
+          data: base64Audio
+        }))
+      }
+      reader.readAsDataURL(blob)
+    } catch (error) {
+      console.error('Error processing audio chunk:', error)
+    }
+  }
 
-      {/* Main container */}
-      <div className="relative z-10 flex h-screen flex-col lg:flex-row">
-        {/* Sidebar */}
-        <div className="w-full lg:w-80 border-r border-glass overflow-y-auto bg-cyber-darker/50 backdrop-blur">
-          <Sidebar
-            selectedFile={selectedFile}
-            onFileSelect={handleFileSelect}
-            currentChunk={currentChunk}
-            maxChunks={maxChunks}
-            onChunkChange={setCurrentChunk}
-            onAnalyze={handleAnalyzeChunk}
-            isAnalyzing={isAnalyzing}
-            isConnected={isConnected}
-            autoPlay={autoPlay}
-            onAutoPlayChange={setAutoPlay}
-            onLiveRecording={handleLiveRecording}
-            onRecordingError={handleRecordingError}
-          />
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: 'audio/webm;codecs=opus'
+      })
+      mediaRecorderRef.current = mediaRecorder
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 1000) {
+          processAudioChunk(event.data)
+        }
+      }
+
+      mediaRecorder.start(5000) // 5-second chunks
+      setIsRecording(true)
+    } catch (error) {
+      console.error('Error starting recording:', error)
+      alert('Could not access microphone. Please check permissions.')
+    }
+  }
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop()
+      mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop())
+      setIsRecording(false)
+    }
+  }
+
+  const toggleRecording = () => {
+    if (isRecording) {
+      stopRecording()
+    } else {
+      startRecording()
+    }
+  }
+
+  // ─── File Upload ─────────────────────────────────────────────────────
+  const handleFileUpload = async (file) => {
+    if (!isConnected) {
+      alert('Not connected to backend')
+      return
+    }
+    setIsProcessing(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      const response = await fetch(`${import.meta.env.VITE_API_URL}/api/upload`, {
+        method: 'POST',
+        body: formData
+      })
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.detail || 'Upload failed')
+      }
+      const data = await response.json()
+      updateDashboard(data)
+    } catch (error) {
+      console.error('Upload error:', error)
+      alert('Upload failed: ' + error.message)
+    } finally {
+      setIsProcessing(false)
+    }
+  }
+
+  // ─── Clear Transcripts ─────────────────────────────────────────────
+  const clearTranscripts = () => {
+    setTranscripts([])
+  }
+
+  // ─── Render ───────────────────────────────────────────────────────────
+  return (
+    <div className="flex h-screen bg-gradient-to-br from-slate-900 via-purple-900/80 to-slate-900">
+      {/* Sidebar */}
+      <Sidebar
+        isRecording={isRecording}
+        isConnected={isConnected}
+        onToggleRecording={toggleRecording}
+        onFileUpload={handleFileUpload}
+        isProcessing={isProcessing}
+      />
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {/* Header */}
+        <header className="glass m-4 rounded-2xl px-6 py-4 flex items-center justify-between border border-white/10">
+          <div>
+            <h1 className="text-2xl font-extrabold bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent">
+              Multi‑Modal Fraud Detector
+            </h1>
+            <p className="text-xs text-white/40 tracking-widest mt-0.5">
+              GAME‑THEORETIC FUSION · 3‑PILLAR ANALYSIS
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 bg-white/5 rounded-full px-3 py-1.5 border border-white/10">
+              <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
+              <span className="text-xs text-white/60">{isConnected ? 'Live' : 'Offline'}</span>
+            </div>
+            {isRecording && (
+              <span className="text-xs text-red-400 animate-pulse">● Recording</span>
+            )}
+          </div>
+        </header>
+
+        {/* Alert Banner */}
+        <div className="px-4">
+          {alert && <AlertBanner alert={alert} />}
         </div>
 
-        {/* Main content */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Alert Banner */}
-          {latestResult && (
-            <AlertBanner
-              threatLevel={getThreatLevel()}
-              threatIndex={latestResult.threat_index}
-              requiresVerification={latestResult.requires_verification}
-              verification={verificationResult}
+        {/* Dashboard Grid */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {/* Pillar Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <TelemetryCard
+              title="Linguistic Analysis"
+              score={pillarData.linguistic.score}
+              details={pillarData.linguistic.details}
+              color="blue"
             />
-          )}
+            <TelemetryCard
+              title="Behavioral Analysis"
+              score={pillarData.behavioral.score}
+              details={pillarData.behavioral.details}
+              color="green"
+            />
+            <TelemetryCard
+              title="Acoustic Analysis"
+              score={pillarData.acoustic.score}
+              details={pillarData.acoustic.details}
+              color="purple"
+            />
+          </div>
 
-          {/* Error display */}
-          {error && (
-            <div className="px-6 py-3 bg-cyber-red/20 border-b border-cyber-red text-cyber-red flex items-center gap-2 font-mono text-sm">
-              <AlertCircle size={16} />
-              {error}
+          {/* Strategy Chart + Transcript */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div className="lg:col-span-2">
+              <StrategyChart weights={strategyWeights} threatIndex={threatIndex} />
             </div>
-          )}
+            <div>
+              <Transcript transcripts={transcripts} onClear={clearTranscripts} />
+            </div>
+          </div>
 
-          {/* Grid layout for metrics and charts */}
-          <div className="flex-1 overflow-y-auto p-6">
-            {!latestResult ? (
-              <div className="flex flex-col items-center justify-center h-full text-center text-gray-500">
-                <Activity size={48} className="mb-4 opacity-50" />
-                <p className="text-lg font-mono">Select audio file and click analyze to begin</p>
-                <p className="text-sm mt-2">Current WebSocket status: {isConnected ? '✓ Connected' : '✗ Disconnected'}</p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 h-fit">
-                {/* Telemetry Cards */}
-                <TelemetryCard
-                  title="Linguistic (Pillar I)"
-                  score={latestResult.pillar_scores[0]}
-                  label="Urgency Score"
-                  subtitle={`${latestResult.linguistic_data.keywords.length} keywords detected`}
-                  topKeywords={latestResult.linguistic_data.keywords.slice(0, 3)}
-                />
-
-                <TelemetryCard
-                  title="Behavioral (Pillar II)"
-                  score={latestResult.pillar_scores[1]}
-                  label="Aggression Score"
-                  subtitle={`Dominance: ${(latestResult.behavioral_data.dominance_score * 100).toFixed(0)}%`}
-                />
-
-                <TelemetryCard
-                  title="Acoustic (Pillar III)"
-                  score={latestResult.pillar_scores[2]}
-                  label="Environment Index"
-                  subtitle={`Noise Elevation: ${(latestResult.acoustic_data.noise_elevation * 100).toFixed(0)}%`}
-                />
-
-                {/* Strategy Chart */}
-                <div className="lg:col-span-3">
-                  <StrategyChart
-                    weights={latestResult.weights}
-                    threatHistory={threatHistory}
-                    strategyMetrics={strategyMetrics}
-                  />
-                </div>
-
-                {/* Transcript */}
-                <div className="lg:col-span-3">
-                  <Transcript
-                    transcripts={transcripts}
-                    currentChunk={currentChunk}
-                    threatLevel={getThreatLevel()}
-                  />
-                </div>
-              </div>
-            )}
+          {/* Threat Level Bar */}
+          <div className="glass-card p-5">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-white/70 uppercase tracking-wider">
+                Current Threat Level
+              </h3>
+              <span className={`text-lg font-extrabold ${
+                threatIndex > 0.55 ? 'text-red-400' :
+                threatIndex > 0.35 ? 'text-amber-400' : 'text-emerald-400'
+              }`}>
+                {(threatIndex * 100).toFixed(1)}%
+              </span>
+            </div>
+            <div className="relative w-full h-3 bg-white/10 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all duration-700 ease-out ${
+                  threatIndex > 0.55 ? 'bg-gradient-to-r from-red-500 to-rose-500' :
+                  threatIndex > 0.35 ? 'bg-gradient-to-r from-amber-500 to-orange-500' :
+                  'bg-gradient-to-r from-emerald-500 to-teal-400'
+                }`}
+                style={{ width: `${Math.min(100, threatIndex * 100)}%` }}
+              />
+              {/* Glow effect */}
+              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent animate-pulse" />
+            </div>
+            <p className="text-xs text-white/30 mt-2 text-center">
+              {threatIndex > 0.55 ? '⚠️ High Threat – Fraud Detected' :
+               threatIndex > 0.35 ? '⚡ Medium Threat – Monitor' :
+               '✅ Low Threat – Normal Call'}
+            </p>
           </div>
         </div>
       </div>
