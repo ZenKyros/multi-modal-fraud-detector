@@ -9,6 +9,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, F
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import uvicorn
+import subprocess
+
 
 from agents.ingestion import IngestionAgent
 from agents.linguistic import LinguisticAgent
@@ -76,6 +78,8 @@ async def analyze_audio(file: UploadFile = File(...)):
 
 # ────────── WebSocket for live audio demo ──────────
 
+ws_headers: dict[WebSocket, bytes] = {}
+
 @app.websocket("/ws/live-audio")
 async def websocket_live_audio(websocket: WebSocket):
     await websocket.accept()
@@ -83,44 +87,62 @@ async def websocket_live_audio(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_bytes()
+            # If this is the first chunk from this connection, save it as header
+            if websocket not in ws_headers:
+                ws_headers[websocket] = data
+                logger.info("WebM header saved")
+                continue   # wait for more data before processing
+
             buffer.extend(data)
-            # Process every ~3 seconds of audio (approx 48000 bytes for 16kHz mono 16-bit)
-            if len(buffer) >= 48000 * 3:
-                # Convert to numpy array
-                import numpy as np
-                audio_np = np.frombuffer(buffer, dtype=np.int16).astype(np.float32) / 32768.0
-                # Save to temp WAV for transcription
-                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-                    import soundfile as sf
-                    sf.write(tmp.name, audio_np, 16000)
+
+            # Process every ~3 seconds of audio (accumulated chunks)
+            if len(buffer) >= 30000:   # adjust based on average chunk size
+                # Prepend header to make a valid WebM file
+                full_data = ws_headers[websocket] + buffer
+
+                ext = ".webm"
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                    tmp.write(full_data)
                     tmp_path = tmp.name
 
+                # Convert to WAV
+                wav_path = tmp_path + ".wav"
+                cmd = [
+                    "ffmpeg", "-i", tmp_path,
+                    "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                    "-y", wav_path
+                ]
+                result_conv = subprocess.run(cmd, capture_output=True, text=True)
+                if result_conv.returncode != 0:
+                    logger.error(f"ffmpeg error: {result_conv.stderr}")
+                    os.remove(tmp_path)
+                    buffer = bytearray()
+                    continue
+
                 # Transcribe
-                transcribed = ingestion.transcribe(tmp_path)
-                os.remove(tmp_path)
+                transcribed = ingestion.transcribe(wav_path)
+                transcript_text = transcribed.get("text", "")
 
-                if transcribed.get("text"):
-                    # Quick analysis
-                    segments = transcribed.get("segments", [])
-                    # Simple speaker assignment alternating (since no real diarization)
-                    for i, seg in enumerate(segments):
-                        seg["speaker"] = "CALLER" if i % 2 == 0 else "RECIPIENT"
-
-                    # Run analysis
-                    result = await run_analysis_pipeline(transcribed, audio_data=audio_np)
+                if transcript_text:
+                    result = await run_analysis_pipeline(transcribed, audio_data=None)
                     await websocket.send_json({
                         "type": "analysis",
-                        "transcript": transcribed["text"],
+                        "transcript": transcript_text,
                         "result": result
                     })
 
-                # Clear buffer
-                buffer = bytearray()
+                # Cleanup
+                os.remove(tmp_path)
+                os.remove(wav_path)
+                buffer = bytearray()   # reset chunk buffer (header stays)
 
     except WebSocketDisconnect:
-        logger.info("Live audio WebSocket disconnected")
+        logger.info("Live audio disconnected")
+        # Remove stored header when connection drops
+        ws_headers.pop(websocket, None)
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
+        ws_headers.pop(websocket, None)
 
 # ────────── Core Analysis Pipeline ──────────
 
