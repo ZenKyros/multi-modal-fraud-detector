@@ -1,172 +1,237 @@
 import os
 import json
-import aiohttp
-import asyncio
-from typing import Dict, Any
 import logging
-from dotenv import load_dotenv
+import aiohttp
+from typing import Dict, Any, List
 
-load_dotenv()
 logger = logging.getLogger(__name__)
+
+# ─────────────────────────── SCORING TABLE ───────────────────────────
+# Each scam technique adds a base score. Combinations increase it.
+# You can tune these values to match your desired sensitivity.
+TECHNIQUE_SCORES = {
+    "threat_of_arrest": 0.95,          # almost certainly scam
+    "financial_data_request": 0.85,    # asking for sort code, CVV, OTP, etc.
+    "authority_impersonation": 0.30,   # impersonating bank, police, HMRC, DHL, etc.
+    "payment_request": 0.30,           # any demand for money
+    "urgency": 0.15,                   # time pressure
+    "sensitive_info_request": 0.20,    # asking for personal details (name, address)
+    "spoofing_attempt": 0.20,          # fake verification, number spoofing
+}
+
+# When multiple techniques are present, we don't simply sum; we use rules.
+# For example:
+#   arrest threat alone -> 0.95
+#   authority + financial data -> 0.90
+#   authority + payment only -> 0.50
+#   payment + urgency -> 0.45
+#   sensitive info alone -> 0.20
+#   no technique -> 0.05
+
+def compute_probability(techniques: List[str]) -> float:
+    """
+    Deterministic mapping from detected techniques to a scam probability.
+    Never returns extreme values unless appropriate.
+    """
+    techniques = [t.lower().strip() for t in techniques]
+    if not techniques:
+        return 0.05
+
+    # Critical combinations first
+    if "threat_of_arrest" in techniques:
+        return 0.95
+    if "financial_data_request" in techniques:
+        if "authority_impersonation" in techniques:
+            return 0.92
+        else:
+            return 0.85
+    # Authority impersonation with payment request
+    if "authority_impersonation" in techniques and "payment_request" in techniques:
+        base = 0.55
+        if "urgency" in techniques:
+            base += 0.10
+        if "spoofing_attempt" in techniques:
+            base += 0.10
+        return min(0.75, base)
+
+    # Payment request alone
+    if "payment_request" in techniques:
+        base = 0.30
+        if "urgency" in techniques:
+            base += 0.15
+        if "authority_impersonation" in techniques:
+            base += 0.10
+        return min(0.50, base)
+
+    # Authority alone
+    if "authority_impersonation" in techniques:
+        base = 0.30
+        if "sensitive_info_request" in techniques:
+            base += 0.15
+        if "urgency" in techniques:
+            base += 0.10
+        return min(0.45, base)
+
+    # Sensitive info alone
+    if "sensitive_info_request" in techniques:
+        return 0.20
+
+    # Spoofing alone
+    if "spoofing_attempt" in techniques:
+        return 0.25
+
+    # Urgency alone (very generic)
+    if "urgency" in techniques:
+        return 0.15
+
+    # Fallback
+    return 0.10
+
 
 class LLMVerifier:
     """
-    LLM-based verification gate using Groq Chat API.
-    Uses Groq's LLM models (Llama, Mixtral) to evaluate fraud indicators.
+    Groq-powered scam verifier that outputs calibrated threat probability.
+    No API keys except Groq needed.
     """
 
     def __init__(self):
-        self.api_key = os.getenv("GROQ_API_KEY")  # Reuse same key
-        self.api_url = "https://api.groq.com/openai/v1/chat/completions"
-        self.model = "llama-3.3-70b-versatile"  # or "mixtral-8x7b-32768"
-        self.timeout = 15
+        self.groq_key = os.getenv("GROQ_API_KEY")
+        self.groq_url = "https://api.groq.com/openai/v1/chat/completions"
+        self.model = "llama-3.1-8b-instant"   # free tier, good balance
 
-        if self.api_key:
-            logger.info("✅ Using Groq LLM for verification")
-        else:
-            logger.error("❌ GROQ_API_KEY is MISSING, verification disabled")
+    async def analyze(self, transcript: str) -> Dict[str, Any]:
+        if not transcript or not transcript.strip():
+            return self._empty_result()
 
-    async def verify(self, pillar_results: Dict[str, Any], threat_index: float, transcript: str = "") -> Dict[str, Any]:
-        """
-        Verify fraud detection using Groq LLM.
+        if self.groq_key:
+            try:
+                result = await self._call_groq(transcript)
+                if result:
+                    return result
+            except Exception as e:
+                logger.error(f"Groq call failed: {e}")
 
-        Returns:
-            dict with is_fraud, confidence, reasons, recommended_action, verified
-        """
-        if not self.api_key:
-            logger.warning("No API key, using fallback")
-            return self._fallback_verification(threat_index)
+        # If LLM unavailable, use built‑in heuristic
+        return self._heuristic_analysis(transcript)
 
-        try:
-            # Build prompt
-            prompt = self._build_prompt(pillar_results, threat_index, transcript)
+    async def _call_groq(self, transcript: str) -> Dict[str, Any] | None:
+        prompt = f"""
+You are a scam call analyst. For the phone conversation transcript below, identify which scam techniques are present. Choose from this list:
+- "threat_of_arrest" – police, jail, custody, legal action
+- "financial_data_request" – asking for sort code, CVV, OTP, password, card number, bank account
+- "authority_impersonation" – pretending to be HMRC, IRS, police, bank, DHL, Microsoft, etc.
+- "payment_request" – any demand to pay money (fee, fine, delivery charge)
+- "urgency" – limited time, immediately, right now, act fast
+- "sensitive_info_request" – asking for personal details (full name, address, DOB) not yet financial
+- "spoofing_attempt" – caller tries to prove identity via fake callback, Google, etc.
 
-            # Call Groq API
-            response = await self._call_groq_api(prompt)
+Return ONLY a JSON object (no markdown) with a single key "techniques" containing an array of the techniques that apply. If none, return empty array.
 
-            # Parse response
-            parsed = self._parse_response(response)
-            parsed["verified"] = True
-            return parsed
-
-        except asyncio.TimeoutError:
-            logger.error("Groq LLM timeout")
-            return self._fallback_verification(threat_index)
-        except Exception as e:
-            logger.error(f"Groq verification error: {str(e)}")
-            return self._fallback_verification(threat_index)
-
-    def _build_prompt(self, pillar_results: Dict[str, Any], threat_index: float, transcript: str) -> str:
-        """Build a structured prompt for the LLM."""
-        linguistic = pillar_results.get("linguistic", {})
-        behavioral = pillar_results.get("behavioral", {})
-        acoustic = pillar_results.get("acoustic", {})
-
-        transcript_short = transcript[:500] + "..." if len(transcript) > 500 else transcript
-
-        prompt = f"""You are a fraud detection expert analyzing a phone call.
-
-Context:
-- Threat Index (0-1): {threat_index:.2f} (threshold for fraud is 0.55)
-- Transcript (partial): {transcript_short}
-
-Pillar Analysis:
-1. Linguistic:
-   - Urgency Score: {linguistic.get('urgency_score', 0):.2f}
-   - Urgency Keywords: {linguistic.get('keyword_matches', [])}
-   - Pillar Score: {linguistic.get('pillar_score', 0):.2f}
-
-2. Behavioral:
-   - Speaker Dominance: {behavioral.get('speaker_dominance', 0):.2f}
-   - Volume Pressure: {behavioral.get('volume_pressure', 0):.2f}
-   - Speech/Pause Ratio: {behavioral.get('speech_pause_ratio', 0):.2f}
-   - Speaking Rate: {behavioral.get('speaking_rate', 0):.2f}
-   - Pillar Score: {behavioral.get('pillar_score', 0):.2f}
-
-3. Acoustic:
-   - Noise Floor: {acoustic.get('noise_floor', 0):.2f}
-   - Background Classification: {acoustic.get('background_classification', 0):.2f}
-   - Environment Type: {acoustic.get('environment_type', 'unknown')}
-   - Pillar Score: {acoustic.get('pillar_score', 0):.2f}
-
-Question:
-Based on this data, is this call likely a fraud/scam attempt?
-Provide a structured answer in valid JSON only (no extra text) with the following fields:
-{{
-  "is_fraud": boolean,
-  "confidence": float (0-1),
-  "reasons": [string, string, ...] (at least 2 reasons),
-  "recommended_action": string (one of: "Block", "Warn", "Monitor", "Ignore")
-}}
-
-Be objective and cite the evidence."""
-        return prompt
-
-    async def _call_groq_api(self, prompt: str) -> Dict[str, Any]:
-        """Send request to Groq Chat API."""
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": "You are a fraud detection expert. Respond only with JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.3,
-            "max_tokens": 300,
-            "response_format": {"type": "json_object"}  # Groq supports this
-        }
-
+Transcript:
+---
+{transcript.strip()}
+---
+"""
         async with aiohttp.ClientSession() as session:
-            async with session.post(self.api_url, json=payload, headers=headers, timeout=self.timeout) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    logger.error(f"Groq API error {resp.status}: {error_text}")
-                    raise Exception(f"API error {resp.status}: {error_text}")
-                return await resp.json()
-
-    def _parse_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract the JSON answer from Groq response."""
-        try:
-            # Groq returns OpenAI-like structure
-            choices = response.get("choices", [])
-            if not choices:
-                raise ValueError("No choices in response")
-            message = choices[0].get("message", {})
-            content = message.get("content", "")
-            if not content:
-                raise ValueError("No content in message")
-
-            # Parse JSON
-            data = json.loads(content)
-
-            # Ensure required fields
-            data["is_fraud"] = bool(data.get("is_fraud", False))
-            data["confidence"] = float(data.get("confidence", 0.5))
-            data["confidence"] = max(0.0, min(1.0, data["confidence"]))
-            if not isinstance(data.get("reasons"), list):
-                data["reasons"] = [str(data["reasons"])] if data.get("reasons") else ["No specific reasons given."]
-            data["recommended_action"] = str(data.get("recommended_action", "Monitor"))
-
-            return data
-
-        except Exception as e:
-            logger.error(f"Failed to parse Groq response: {e}")
-            return {
-                "is_fraud": False,
-                "confidence": 0.5,
-                "reasons": ["LLM response parsing failed, using fallback."],
-                "recommended_action": "Monitor"
+            headers = {
+                "Authorization": f"Bearer {self.groq_key}",
+                "Content-Type": "application/json"
             }
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.0,
+                "response_format": {"type": "json_object"}
+            }
+            async with session.post(self.groq_url, headers=headers, json=payload, timeout=20) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    content = data["choices"][0]["message"]["content"]
+                    techniques = self._parse_techniques(content)
+                    if techniques is not None:
+                        prob = compute_probability(techniques)
+                        return {
+                            "scam_probability": prob,
+                            "scam_type": self._guess_scam_type(techniques),
+                            "indicators": techniques,
+                            "explanation": f"Detected techniques: {', '.join(techniques)}"
+                        }
+                else:
+                    err = await resp.text()
+                    logger.error(f"Groq API error {resp.status}: {err}")
+                    return None
 
-    def _fallback_verification(self, threat_index: float) -> Dict[str, Any]:
-        """Rule-based fallback when LLM is unavailable."""
+    def _parse_techniques(self, text: str) -> List[str] | None:
+        text = text.strip()
+        # Remove markdown fences
+        if text.startswith("```"):
+            lines = text.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines)
+        try:
+            data = json.loads(text)
+            techniques = data.get("techniques", [])
+            if isinstance(techniques, list):
+                return [t for t in techniques if isinstance(t, str)]
+        except json.JSONDecodeError:
+            import re
+            match = re.search(r'\{.*\}', text, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group())
+                    return data.get("techniques", [])
+                except:
+                    pass
+        logger.warning(f"Could not parse techniques from: {text[:150]}")
+        return None
+
+    def _guess_scam_type(self, techniques: List[str]) -> str:
+        if "threat_of_arrest" in techniques:
+            return "government_impersonation"
+        if "financial_data_request" in techniques:
+            return "banking"
+        if "authority_impersonation" in techniques:
+            if any(t in " ".join(techniques) for t in ["hmrc", "irs", "police"]):
+                return "government_impersonation"
+            if "payment_request" in techniques:
+                return "delivery_scam"
+            return "other"
+        if "payment_request" in techniques:
+            return "other"
+        return "none"
+
+    def _heuristic_analysis(self, transcript: str) -> Dict[str, Any]:
+        """Rule‑based fallback if LLM fails."""
+        t = transcript.lower()
+        techniques = []
+        if any(w in t for w in ["arrest", "custody", "police will come"]):
+            techniques.append("threat_of_arrest")
+        if any(w in t for w in ["sort code", "cvv", "otp", "one time password", "card number"]):
+            techniques.append("financial_data_request")
+        if any(w in t for w in ["hmrc", "irs", "social security", "crown court", "microsoft", "dhl"]):
+            techniques.append("authority_impersonation")
+        if any(w in t for w in ["pay", "fee", "fine", "transfer", "payment"]):
+            techniques.append("payment_request")
+        if any(w in t for w in ["urgent", "immediately", "right now", "24 hours"]):
+            techniques.append("urgency")
+        if any(w in t for w in ["open google", "call back", "official number"]):
+            techniques.append("spoofing_attempt")
+
+        prob = compute_probability(techniques)
         return {
-            "is_fraud": threat_index > 0.65,
-            "confidence": min(threat_index * 0.8, 0.9),
-            "reasons": ["LLM verification unavailable – using rule-based fallback."],
-            "recommended_action": "Investigate" if threat_index > 0.65 else "Monitor",
-            "verified": False
+            "scam_probability": prob,
+            "scam_type": self._guess_scam_type(techniques),
+            "indicators": techniques,
+            "explanation": f"Heuristic analysis: {', '.join(techniques) if techniques else 'no techniques'}"
+        }
+
+    def _empty_result(self) -> Dict[str, Any]:
+        return {
+            "scam_probability": 0.0,
+            "scam_type": "none",
+            "indicators": [],
+            "explanation": "Empty transcript"
         }

@@ -56,3 +56,5 @@ dist/
 # Temporary files
 *.tmp
 /tmp/
+backend/models/
+backend/models/

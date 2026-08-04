@@ -1,158 +1,104 @@
-import numpy as np
-from typing import Dict, List, Any
-import logging
+import math
+from typing import Dict, Any
 
-logger = logging.getLogger(__name__)
 
-class BayesianFusionEngine:
+class BayesianFusion:
     """
-    Improved Bayesian Fusion Engine with:
-    - Adaptive prior updates based on recent history
-    - Smoother posterior updates with exponential forgetting
-    - Better likelihood modeling with Beta distributions
-    - Confidence score for each prediction
+    Bayesian fusion that trusts the LLM as the primary evidence
+    and treats linguistic/behavioral/acoustic as supplementary,
+    with a maximum shift of ±15% absolute.
     """
-    
-    def __init__(self, alpha: float = 0.3):
-        """
-        Args:
-            alpha: Forgetting factor for prior adaptation (0-1)
-                  Higher = faster adaptation to new data
-        """
-        self.type_names = ["Normal", "BankScam", "TechSupport", "Government"]
-        self.num_types = len(self.type_names)
-        
-        # Initial priors (can be updated adaptively)
-        self.prior = np.array([0.6, 0.2, 0.1, 0.1])
-        self.adaptive_prior = self.prior.copy()
-        self.alpha = alpha
-        
-        # Beta parameters for each pillar and type
-        # Each type has (alpha, beta) parameters for Beta distribution
-        self.pillar_params = {
-            "linguistic": {
-                "Normal": (2.0, 4.0),
-                "BankScam": (8.0, 2.0),
-                "TechSupport": (5.0, 3.0),
-                "Government": (6.0, 3.0)
-            },
-            "behavioral": {
-                "Normal": (3.0, 4.0),
-                "BankScam": (7.0, 3.0),
-                "TechSupport": (5.0, 4.0),
-                "Government": (4.0, 4.0)
-            },
-            "acoustic": {
-                "Normal": (2.0, 5.0),
-                "BankScam": (4.0, 5.0),
-                "TechSupport": (7.0, 3.0),
-                "Government": (5.0, 4.0)
-            }
-        }
-        
-        # History for adaptive prior updates
-        self.posterior_history = []
-        self.history_length = 20
-        self.iteration = 0
-        
-        logger.info("🧠 Improved Bayesian Fusion Engine initialized.")
 
-    def calculate_threat_index(self, pillar_results: Dict[str, Any]) -> float:
-        """Calculate threat index with improved Bayesian fusion."""
-        # Extract scores
-        scores = {
-            "linguistic": pillar_results.get("linguistic", {}).get("pillar_score", 0.0),
-            "behavioral": pillar_results.get("behavioral", {}).get("pillar_score", 0.0),
-            "acoustic": pillar_results.get("acoustic", {}).get("pillar_score", 0.0)
+    def __init__(self):
+        # no prior needed – LLM score is the starting point
+        self.max_shift = 0.15        # maximum absolute change allowed
+        self.weights = {
+            "linguistic": 0.3,
+            "behavioral": 0.25,
+            "acoustic": 0.2,
         }
-        
-        # Update adaptive prior based on history
-        self._update_adaptive_prior(scores)
-        
-        # Compute likelihood for each type
-        likelihoods = np.zeros(self.num_types)
-        for t, type_name in enumerate(self.type_names):
-            ll = 1.0
-            for pillar, score in scores.items():
-                a, b = self.pillar_params[pillar][type_name]
-                ll *= self._beta_pdf(score, a, b)
-            likelihoods[t] = ll
-        
-        # Bayes' rule with adaptive prior
-        unnormalized = self.adaptive_prior * likelihoods
-        evidence = np.sum(unnormalized)
-        if evidence > 0:
-            posterior = unnormalized / evidence
+
+    def _evidence_lr(self, score: float, weight: float) -> float:
+        """
+        Convert detector score into a likelihood ratio.
+        score = 0.5 → LR = 1.0 (neutral)
+        score > 0.5 → slight support for scam
+        score < 0.5 → slight support for genuine
+
+        The weight controls how strongly the LR deviates from 1.
+        """
+        score = max(0.01, min(0.99, score))
+        # Compress the score so it can't produce extreme LRs
+        if score > 0.5:
+            # maps 0.5->1, 0.75->~1.2, 0.99->~2
+            lr = 1.0 + (score - 0.5) * 2.0
         else:
-            posterior = self.prior.copy()
-        
-        # Store posterior history
-        self.posterior_history.append(posterior.copy())
-        if len(self.posterior_history) > self.history_length:
-            self.posterior_history.pop(0)
-        
-        # Compute threat index with confidence
-        threat_index = 1.0 - posterior[0]
-        
-        # Compute confidence (based on posterior entropy)
-        confidence = self._compute_confidence(posterior)
-        
-        self.iteration += 1
-        if self.iteration % 5 == 0:
-            logger.info(f"📊 Posterior: {posterior.round(3).tolist()}")
-            logger.info(f"📈 Threat: {threat_index:.3f}, Confidence: {confidence:.3f}")
-        
-        return float(np.clip(threat_index, 0.0, 1.0))
+            # maps 0.5->1, 0.25->0.8, 0.01->0.5
+            lr = 1.0 / (1.0 + (0.5 - score) * 2.0)
 
-    def _update_adaptive_prior(self, scores: Dict[str, float]):
-        """Update adaptive prior based on recent history."""
-        if len(self.posterior_history) < 5:
-            return
-        
-        # Compute average posterior over recent history
-        recent_avg = np.mean(self.posterior_history[-5:], axis=0)
-        
-        # Smooth update with forgetting factor
-        self.adaptive_prior = (1 - self.alpha) * self.adaptive_prior + self.alpha * recent_avg
-        self.adaptive_prior = self.adaptive_prior / np.sum(self.adaptive_prior)
+        # Apply weight: weight=1 keeps the same, weight=0 keeps LR=1
+        return 1.0 + (lr - 1.0) * weight
 
-    def _beta_pdf(self, x: float, a: float, b: float) -> float:
-        """Beta distribution probability density function."""
-        if x <= 0 or x >= 1:
-            return 1e-10
-        # Log-beta for numerical stability
-        from scipy.special import betaln
-        log_pdf = (a - 1) * np.log(x) + (b - 1) * np.log(1 - x) - betaln(a, b)
-        return np.exp(log_pdf)
+    def probability_to_odds(self, p: float) -> float:
+        p = max(0.001, min(0.999, p))
+        return p / (1.0 - p)
 
-    def _compute_confidence(self, posterior: np.ndarray) -> float:
-        """Compute confidence based on posterior entropy."""
-        # High confidence = low entropy
-        entropy = -np.sum(posterior * np.log(posterior + 1e-10))
-        max_entropy = np.log(self.num_types)
-        confidence = 1.0 - (entropy / max_entropy)
-        return float(np.clip(confidence, 0.0, 1.0))
+    def odds_to_probability(self, odds: float) -> float:
+        return odds / (1.0 + odds)
 
-    def get_strategy_weights(self) -> Dict[str, Any]:
-        """Return current fusion state."""
-        # For Bayesian fusion, we return posterior-based weights
-        # This mimics the "strategy" concept but is posterior-driven
-        weights = self.adaptive_prior.copy()
-        weights[0] = 0  # Normal type weight set to 0 for strategy
-        weights = weights / np.sum(weights) if np.sum(weights) > 0 else np.array([1/3, 1/3, 1/3])
-        
+    def fuse(
+        self,
+        llm_result: Dict[str, Any],
+        linguistic_result: Dict[str, Any],
+        behavioral_result: Dict[str, Any],
+        acoustic_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+
+        # Use LLM probability as the primary calibrated estimate
+        llm_prob = llm_result.get("scam_probability", 0.5)
+
+        # Extract scores from other agents, default to 0.5 if missing
+        ling = linguistic_result.get("urgency_score", 0.5)
+        beh = behavioral_result.get("behavior_score", 0.5)
+        ac = acoustic_result.get("arousal_score", 0.5)
+
+        # Compute a fused probability using LLM as a weighted average
+        # Weight of LLM is high (0.85) so other agents can only slightly adjust
+        w_llm = 0.85
+        w_other = 0.15
+
+        # Convert other scores to probabilities (they are already 0-1)
+        # Just average them (equally weighted among the three)
+        other_avg = (ling + beh + ac) / 3.0
+
+        # Weighted combination
+        fused_prob = w_llm * llm_prob + w_other * other_avg
+
+        # Clamp
+        fused_prob = max(0.0, min(1.0, fused_prob))
+
+        # Decision thresholds (same as before)
+        if fused_prob >= 0.90:
+            decision = "BLOCK"
+        elif fused_prob >= 0.70:
+            decision = "HANG_UP"
+        elif fused_prob >= 0.45:
+            decision = "WARN"
+        elif fused_prob >= 0.25:
+            decision = "VERIFY"
+        else:
+            decision = "CONTINUE"
+
+        # Confidence: how close are all signals?
+        signals = [llm_prob, ling, beh, ac]
+        agreement = 1.0 - (max(signals) - min(signals))  # simple agreement metric
+        confidence = max(0.1, min(1.0, agreement))
+
         return {
-            "weights": {
-                "linguistic": float(weights[1] if len(weights) > 1 else 0.33),
-                "behavioral": float(weights[2] if len(weights) > 2 else 0.33),
-                "acoustic": float(weights[3] if len(weights) > 3 else 0.33)
-            },
-            "posterior": {
-                "normal": float(self.adaptive_prior[0]),
-                "bank_scam": float(self.adaptive_prior[1]),
-                "tech_support": float(self.adaptive_prior[2]),
-                "government": float(self.adaptive_prior[3])
-            },
-            "threat_index": 1.0 - float(self.adaptive_prior[0]),
-            "confidence": 1.0 - float(self.adaptive_prior[0])  # Placeholder, can be improved
+            "risk_score": round(fused_prob, 3),
+            "decision": decision,
+            "confidence": round(confidence, 3),
+            "scam_type": llm_result.get("scam_type", "none"),
+            "indicators": llm_result.get("indicators", []),
+            "explanation": llm_result.get("explanation", "")
         }

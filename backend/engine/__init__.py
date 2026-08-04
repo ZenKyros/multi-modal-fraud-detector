@@ -1,4 +1,4 @@
-from .bayesian_fusion import BayesianFusionEngine as GameTheoryEngine
-from .llm_verifier import LLMVerifier
+# engine/__init__.py
 
-__all__ = ["GameTheoryEngine", "LLMVerifier"]
+from .llm_verifier import LLMVerifier
+from .bayesian_fusion import BayesianFusion
