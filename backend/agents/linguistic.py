@@ -11,31 +11,32 @@ class LinguisticAgent:
             "urgency": [
                 "urgent", "immediately", "right now", "asap",
                 "emergency", "hurry", "quick", "don't delay",
-                "act now", "limited time", "deadline"
+                "act now", "limited time", "deadline" ,"time-sensitive" , "pressing" , "critical" , "important" , "priority" , "rush"
             ],
             "threat": [
                 "arrest", "police", "custody", "court", "legal action",
                 "sue", "prosecute", "jail", "prison", "criminal",
                 "enforcement", "officer", "law", "summons",
-                "warrant", "bailiff"
+                "warrant", "bailiff", "penalty", "fine", "charge", "violation"
             ],
             "financial": [
                 "bank", "account", "sort code", "card number",
                 "password", "pin", "otp", "one time password",
                 "transfer", "payment", "pay", "money",
                 "balance", "funds", "withdraw", "deposit",
-                "credit", "debit", "transaction"
+                "credit", "debit", "transaction" , "FIR" , "FIR number" , "criminal case" , "case number" , "police report"
             ],
             "impersonation": [
                 "hmrc", "irs", "social security", "microsoft",
                 "apple", "amazon", "google", "your bank",
                 "calling from", "official", "government",
-                "representative", "department"
+                "representative", "department" ,"officials", "authority", "agency"
             ],
             "information_request": [
                 "tell me your", "confirm your", "verify your",
                 "what is your", "give me your", "provide your",
-                "read out", "spell your"
+                "read out", "spell your" , "details", "credentials", "personal information"
+
             ]
         }
 
