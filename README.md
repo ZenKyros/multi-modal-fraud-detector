@@ -71,6 +71,7 @@ It computes:
 - Defender strategy
 - Attacker strategy
 - Adaptive pillar weighting
+- Use Game Theory Logic
 
 The payoff matrix is visualised as an interactive heatmap with the equilibrium highlighted.
 
