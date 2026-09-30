@@ -5,27 +5,6 @@
 
 ---
 
-# 📌 Table of Contents
-
-- [✨ Features](#-features)
-- [🧠 How It Works](#-how-it-works)
-- [🏗️ System Architecture](#️-system-architecture)
-- [📦 Prerequisites](#-prerequisites)
-- [🚀 Installation & Setup](#-installation--setup)
-- [▶️ Running the Application](#️-running-the-application)
-- [🧪 Testing the System](#-testing-the-system)
-- [📊 API Endpoints](#-api-endpoints)
-- [🔧 Configuration](#-configuration)
-- [🧰 Technologies Used](#-technologies-used)
-- [📈 Performance Metrics](#-performance-metrics)
-- [🤝 Contributing](#-contributing)
-- [📄 License](#-license)
-- [🙌 Acknowledgements](#-acknowledgements)
-- [📬 Support](#-support)
-
----
-
-# ✨ Features
 
 ## Three Analytical Pillars
 
